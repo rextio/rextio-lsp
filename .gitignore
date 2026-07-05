@@ -8,3 +8,7 @@ build/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# direnv folder-scoped GitHub CLI config (machine-local)
+.envrc
+~/

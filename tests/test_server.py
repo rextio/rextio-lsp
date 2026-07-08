@@ -25,6 +25,7 @@ from rextio_lsp.server import (
     code_lenses_for,
     create_server,
     diagnostics_for_file,
+    _native_exempt_span,
     find_native_decorator_line,
     function_at_line,
     latency_log,
@@ -1060,6 +1061,73 @@ def test_code_action_withheld_for_unterminated_string_in_args():
 
 
 # --------------------------------------------------------------------------- #
+# tokenize-based exempt span: full adversarial string matrix (rounds 17-19).
+# --------------------------------------------------------------------------- #
+def _native_line(arg_line: str) -> str:
+    """A one-rejected-fn document whose native decorator line is ``arg_line``."""
+    return f"{arg_line}\ndef rejected(xs: list[int]) -> int:\n    return helper(xs)\n"
+
+
+def test_code_action_span_single_line_triple_double_quote():
+    # F1 of round 19: a single-line triple-quoted arg with an in-string `)` — the
+    # single-char quote scanner stopped at the in-string `)` and corrupted the
+    # edit. tokenize sees one STRING token, so the real close is spanned.
+    text = _native_line('@rextio.native(target="""a")b""")')
+    (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
+    assert _apply(text, edit) == "@rextio.exempt"
+
+
+def test_code_action_span_single_line_triple_single_quote():
+    # the triple-SINGLE-quote sibling of the F1 shape.
+    text = _native_line("@rextio.native(target='''a')b''')")
+    (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
+    assert _apply(text, edit) == "@rextio.exempt"
+
+
+def test_code_action_span_call_arg_with_trailing_comment():
+    # a nested call f(x) plus a trailing comment: the comment (and any parens in
+    # it) is a COMMENT token and never joins the paren depth.
+    text = _native_line("@rextio.native(target=f(x))  # keep )(")
+    (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
+    assert _apply(text, edit) == "@rextio.exempt  # keep )("
+
+
+def test_code_action_span_escaped_quote_in_string():
+    # an escaped quote inside the string must not end the literal early.
+    text = _native_line(r'@rextio.native(target="a\"b)c")')
+    (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
+    assert _apply(text, edit) == "@rextio.exempt"
+
+
+def test_code_action_span_adjacent_string_literals():
+    # implicit string adjacency "a" "b)c": the `)` sits inside the second literal.
+    text = _native_line('@rextio.native(target="a" "b)c")')
+    (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
+    assert _apply(text, edit) == "@rextio.exempt"
+
+
+def test_native_exempt_span_withholds_on_unterminated_triple_quote():
+    # a line tokenize rejects (unterminated triple quote) is unanalyzable: the
+    # helper withholds rather than guess a span.
+    assert _native_exempt_span('@rextio.native(target="""oops)') is None
+
+
+def test_native_exempt_span_withholds_on_multiline_opener():
+    # a bare multi-line opener never closes on the line -> tokenize raises -> None.
+    assert _native_exempt_span("@rextio.native(") is None
+
+
+def test_native_exempt_span_columns_are_code_points_with_non_ascii():
+    # tokenize columns are 0-based code-point offsets, matching line[:col]; a
+    # non-ASCII arg must not shift the span.
+    line = '@rextio.native(target="rüst🦀")'
+    span = _native_exempt_span(line)
+    assert span is not None
+    start, end = span
+    assert line[start:end] == line  # whole decorator token + arg list
+
+
+# --------------------------------------------------------------------------- #
 # Multi-line decorator tolerance in the quick-fix scan (fix #10).
 # --------------------------------------------------------------------------- #
 def test_find_native_decorator_multiline_decorator_below_native():
@@ -1077,6 +1145,54 @@ def test_find_native_decorator_not_counted_inside_paren_args():
 def test_find_native_decorator_class_method_without_blank_line():
     lines = ["class C:", "    @rextio.native", "    def m(self):", "        pass"]
     assert find_native_decorator_line(lines, 3) == 1
+
+
+# --------------------------------------------------------------------------- #
+# tokenize-based block balance: sibling string/comment parens no longer skew
+# the contiguous-decorator scan (round 19 F2).
+# --------------------------------------------------------------------------- #
+def test_find_native_decorator_sibling_string_paren_offers_fix():
+    # F2: a `(` inside a sibling decorator's STRING arg made the char-count
+    # balance nonzero, so @rextio.native was mistaken for a continuation line and
+    # the fix was suppressed. Token paren depth ignores the in-string paren.
+    lines = ['@foo("(")', "@rextio.native", "def bar():", "    pass"]
+    assert find_native_decorator_line(lines, 3) == 1
+
+
+def test_find_native_decorator_sibling_comment_paren_offers_fix():
+    # a `(` in a sibling decorator's trailing comment must not skew the balance.
+    lines = ["@foo  # (", "@rextio.native", "def bar():", "    pass"]
+    assert find_native_decorator_line(lines, 3) == 1
+
+
+def test_find_native_decorator_multiline_sibling_above_native():
+    # a genuine multi-line sibling decorator above native: OP paren tokens on the
+    # fragment lines keep the running balance, so native is still found.
+    lines = ["@foo(", '    arg="x",', ")", "@rextio.native", "def bar():", "    pass"]
+    assert find_native_decorator_line(lines, 5) == 3
+
+
+def test_code_action_offered_over_sibling_string_paren_full_path():
+    # drive F2 through the real code-action path, not just the locator.
+    module = "/proj/ops.py"
+    text = (
+        '@foo("(")\n'
+        "@rextio.native\n"
+        "def rejected(xs: list[int]) -> int:\n"
+        "    return helper(xs)\n"
+    )
+    report = _rejected_report(module, def_line=3, diag_line=4)
+    diags = diagnostics_for_file(report, module, degraded=False)
+    actions = code_actions_for(
+        report,
+        file_path=module,
+        uri="file:///proj/ops.py",
+        document_text=text,
+        context_diagnostics=diags,
+    )
+    (edit,) = actions[0].edit.changes["file:///proj/ops.py"]
+    assert edit.new_text == "@rextio.exempt"
+    assert edit.range.start.line == 1  # the @rextio.native line
 
 
 # --------------------------------------------------------------------------- #

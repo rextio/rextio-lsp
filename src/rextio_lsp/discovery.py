@@ -37,15 +37,25 @@ def find_project_root_for_uri(uri: str) -> Path | None:
 
 
 def uri_to_path(uri: str) -> Path | None:
-    """Best-effort conversion of a ``file://`` URI to a local path."""
-    from urllib.parse import unquote, urlparse
+    """Best-effort conversion of a ``file://`` URI to a local path.
 
-    parsed = urlparse(uri)
-    if parsed.scheme and parsed.scheme != "file":
-        return None
-    if not parsed.scheme:
+    Delegates to pygls' own URI helper (``pygls.uris.to_fs_path``) so Windows
+    drive-letter (``file:///C:/x``) and UNC (``file://server/share/x``) shapes
+    convert correctly -- a hand-rolled ``Path(unquote(urlparse(uri).path))``
+    mangles both (drive letters keep a leading slash and lose their drive; UNC
+    hosts drop the netloc). Non-``file`` schemes return ``None``; a bare path
+    with no scheme is treated as a local path.
+    """
+    from urllib.parse import urlparse
+
+    from pygls.uris import to_fs_path
+
+    if not urlparse(uri).scheme:
         return Path(uri)
-    return Path(unquote(parsed.path))
+    fs_path = to_fs_path(uri)
+    if fs_path is None:
+        return None
+    return Path(fs_path)
 
 
 def find_rextio_binary(
@@ -58,9 +68,8 @@ def find_rextio_binary(
     0. A ``rextio`` binary next to ``interpreter_path`` when the client supplied
        one via ``initializationOptions.interpreter.path``. This is consulted
        first so an editor-configured interpreter wins over auto-discovery.
-    1. A ``rextio`` binary next to the project's Python interpreter, when a
-       project virtualenv is discoverable (``.venv``/``venv`` under the root,
-       or ``VIRTUAL_ENV``).
+    1. A ``rextio`` binary inside a project virtualenv (see
+       :func:`find_project_venv_binary`).
     2. A ``rextio`` on ``PATH``.
 
     ``sys.executable`` (the LSP server's own interpreter) is deliberately *not*
@@ -69,13 +78,12 @@ def find_rextio_binary(
     """
     if interpreter_path:
         candidate = Path(interpreter_path).parent / _exe("rextio")
-        if candidate.is_file() and os.access(candidate, os.X_OK):
+        if _is_executable(candidate):
             return candidate
 
-    for python in _candidate_project_pythons(project_root):
-        candidate = python.parent / _exe("rextio")
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
+    venv_binary = find_project_venv_binary(project_root)
+    if venv_binary is not None:
+        return venv_binary
 
     from shutil import which
 
@@ -83,21 +91,59 @@ def find_rextio_binary(
     return Path(found) if found else None
 
 
-def _candidate_project_pythons(project_root: Path) -> list[Path]:
-    pythons: list[Path] = []
-    venv_env = os.environ.get("VIRTUAL_ENV")
+def find_project_venv_binary(project_root: Path) -> Path | None:
+    """Return a ``rextio`` binary from a project virtualenv, or ``None``.
+
+    For each candidate venv root (``VIRTUAL_ENV`` first, then ``<root>/.venv``
+    and ``<root>/venv``):
+
+    1. probe ``<venv>/bin/rextio`` (``Scripts/rextio.exe`` on Windows) directly
+       -- the binary is what we ultimately want, so prefer it over the
+       interpreter indirection (this also covers venvs that expose only a
+       versioned ``python3.X`` and no bare ``python3``/``python``);
+    2. otherwise probe a ``rextio`` beside the venv's Python interpreter
+       (``python3``/``python``, then a ``python3.X`` glob fallback).
+    """
+    bindir = "Scripts" if sys.platform == "win32" else "bin"
+    for venv in _candidate_venv_roots(project_root):
+        direct = venv / bindir / _exe("rextio")
+        if _is_executable(direct):
+            return direct
+        for python in _venv_pythons(venv / bindir):
+            candidate = python.parent / _exe("rextio")
+            if _is_executable(candidate):
+                return candidate
+    return None
+
+
+def _candidate_venv_roots(project_root: Path) -> list[Path]:
     roots: list[Path] = []
+    venv_env = os.environ.get("VIRTUAL_ENV")
     if venv_env:
         roots.append(Path(venv_env))
     roots.extend([project_root / ".venv", project_root / "venv"])
-    bindir = "Scripts" if sys.platform == "win32" else "bin"
-    for root in roots:
-        for name in ("python3", "python"):
-            candidate = root / bindir / _exe(name)
-            if candidate.is_file():
-                pythons.append(candidate)
-                break
+    return roots
+
+
+def _venv_pythons(bindir: Path) -> list[Path]:
+    """Return interpreter candidates in ``bindir``.
+
+    ``python3``/``python`` first, else a ``python3.X`` glob fallback for venvs
+    that expose only a versioned interpreter name.
+    """
+    pythons: list[Path] = []
+    for name in ("python3", "python"):
+        candidate = bindir / _exe(name)
+        if candidate.is_file():
+            pythons.append(candidate)
+    if not pythons:
+        pattern = "python3.*.exe" if sys.platform == "win32" else "python3.*"
+        pythons.extend(sorted(p for p in bindir.glob(pattern) if p.is_file()))
     return pythons
+
+
+def _is_executable(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
 
 
 def _exe(name: str) -> str:

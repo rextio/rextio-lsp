@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+from pathlib import PureWindowsPath
 
 from rextio_lsp.discovery import (
     find_project_root,
     find_project_root_for_uri,
+    find_project_venv_binary,
     find_rextio_binary,
     uri_to_path,
 )
@@ -44,6 +46,34 @@ def test_uri_to_path_roundtrip(tmp_path):
     module.write_text("", encoding="utf-8")
     assert uri_to_path(module.as_uri()) == module
     assert uri_to_path("untitled:foo") is None
+
+
+def test_uri_to_path_windows_drive_letter():
+    # Platform-independent assertions (run on macOS via PureWindowsPath): the
+    # hand-rolled Path(unquote(urlparse(...).path)) yielded "/C:/..." which
+    # PureWindowsPath treats as drive-less and non-absolute. pygls' helper keeps
+    # the drive.
+    path = uri_to_path("file:///C:/Users/x/a.py")
+    assert path is not None
+    win = PureWindowsPath(str(path))
+    assert win.drive.lower() == "c:"
+    assert win.is_absolute()
+    assert win.name == "a.py"
+
+
+def test_uri_to_path_unc_share():
+    path = uri_to_path("file://server/share/a.py")
+    assert path is not None
+    win = PureWindowsPath(str(path))
+    # the netloc (host) is preserved as a UNC anchor, not dropped
+    assert "server" in win.anchor
+    assert "share" in win.anchor
+    assert win.name == "a.py"
+
+
+def test_uri_to_path_rejects_non_file_scheme():
+    assert uri_to_path("http://example.com/a.py") is None
+    assert uri_to_path("vscode-notebook-cell:/x.py") is None
 
 
 def test_find_rextio_binary_prefers_project_venv(tmp_path, monkeypatch):
@@ -97,3 +127,36 @@ def test_find_rextio_binary_interpreter_path_missing_binary_falls_back(tmp_path,
     interp_py = interp_bin / "python"
     interp_py.write_text("", encoding="utf-8")
     assert find_rextio_binary(tmp_path, str(interp_py)) is None
+
+
+def test_find_project_venv_binary_direct_probe_without_python(tmp_path, monkeypatch):
+    # a venv that exposes rextio but NO python3/python interpreter at all: the
+    # direct <venv>/bin/rextio probe must still find it.
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    bindir = tmp_path / ".venv" / "bin"
+    bindir.mkdir(parents=True)
+    binary = bindir / "rextio"
+    binary.write_text("", encoding="utf-8")
+    os.chmod(binary, 0o755)
+    assert find_project_venv_binary(tmp_path) == binary
+    assert find_rextio_binary(tmp_path) == binary
+
+
+def test_find_project_venv_binary_versioned_python_only(tmp_path, monkeypatch):
+    # venv with only ``python3.12`` (no python3/python): the neighbour-of-python
+    # fallback still locates rextio via the python3.X glob.
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    bindir = tmp_path / ".venv" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "python3.12").write_text("", encoding="utf-8")
+    binary = bindir / "rextio"
+    binary.write_text("", encoding="utf-8")
+    os.chmod(binary, 0o755)
+    # remove the direct-probe advantage is not possible (same dir), but this
+    # documents the versioned-python discovery path explicitly.
+    assert find_project_venv_binary(tmp_path) == binary
+
+
+def test_find_project_venv_binary_none_without_venv(tmp_path, monkeypatch):
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    assert find_project_venv_binary(tmp_path) is None

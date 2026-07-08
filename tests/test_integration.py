@@ -12,6 +12,7 @@ from rextio_lsp.contract import is_contract_supported
 from rextio_lsp.engine import Engine
 from rextio_lsp.server import (
     build_hover_markdown,
+    code_lenses_for,
     diagnostics_for_file,
     function_at_line,
 )
@@ -67,3 +68,18 @@ def test_real_capabilities_guidance_and_hover(tmp_path):
     assert "fallback-python" in md
     for code in rejected.rejection_codes:
         assert code in md
+
+
+def test_real_code_lens_renders_on_accepted_function(tmp_path):
+    module = make_tiny_project(tmp_path)
+    engine = Engine()
+    report = engine.check(tmp_path)
+    assert report is not None
+
+    lenses = code_lenses_for(report, str(module.resolve()))
+    assert lenses  # one per analyzed function
+    by_arg = {lens.command.arguments[0]: lens for lens in lenses}
+    # the accepted function renders a native-direct route lens
+    add_one = by_arg["tiny.ops.add_one"]
+    assert add_one.command.title == "Rextio: native-direct"
+    assert add_one.command.command == "rextio.showRouteInfo"

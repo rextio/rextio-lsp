@@ -1,21 +1,32 @@
-"""pygls server: Rextio-only diagnostics and hover.
+"""pygls server: Rextio-only diagnostics, hover, code lens, and code actions.
 
 Capabilities are deliberately narrow (owner-decided): the server advertises
-publishDiagnostics and hover and *nothing else* -- no completion, formatting,
-rename, definition, or references. Diagnostics carry ``source: "rextio"`` and
-the RXT/RXTP code; severity never escalates to Error (see :func:`map_severity`).
+publishDiagnostics, hover, and -- when enabled -- code lens and quick-fix code
+actions, and *nothing else* -- no completion, formatting, rename, definition, or
+references. Diagnostics carry ``source: "rextio"`` and the RXT/RXTP code;
+severity never escalates to Error (see :func:`map_severity`).
+
+Code lens is registered only when ``initializationOptions.codeLens.enable`` is
+true, using the pygls initialize hook: the user INITIALIZE handler runs before
+server capabilities are computed, so features registered there are advertised
+(and omitted entirely when disabled).
 
 The pure conversion helpers (:func:`map_severity`, :func:`to_lsp_diagnostic`,
 :func:`diagnostics_for_file`, :func:`build_hover_markdown`,
-:func:`function_at_line`) are module-level and pygls-free so they can be unit
-tested without a running server.
+:func:`function_at_line`, :func:`code_lenses_for`, :func:`code_actions_for`,
+:func:`parse_initialization_options`, :func:`latency_log`) are module-level and
+pygls-free so they can be unit tested without a running server.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from lsprotocol import types as lsp
 from pygls.lsp.server import LanguageServer
@@ -31,12 +42,74 @@ from rextio_lsp.contract import (
     lsp_character,
     lsp_line,
 )
-from rextio_lsp.discovery import find_project_root, uri_to_path
+from rextio_lsp.discovery import CONFIG_FILENAME, find_project_root, uri_to_path
 from rextio_lsp.engine import Engine
 
 logger = logging.getLogger("rextio_lsp.server")
 
 DEBOUNCE_SECONDS = 0.3
+
+# A whole-project check slower than this is surfaced at window/logMessage Info
+# (otherwise Log). See :func:`latency_log`.
+LATENCY_WARN_SECONDS = 2.0
+
+# Client-bindable command id carried by each route code lens. The server does
+# not implement it (it registers no command handler); the lens is informational
+# and the client may bind the id later.
+ROUTE_INFO_COMMAND = "rextio.showRouteInfo"
+
+# Title of the exempt quick fix and the native decorator it rewrites.
+EXEMPT_ACTION_TITLE = "Rextio: keep on Python fallback (@rextio.exempt)"
+_NATIVE_DECORATOR_RE = re.compile(r"@rextio\.native\b")
+
+
+@dataclass(frozen=True)
+class InitializationOptions:
+    """Parsed ``initializationOptions`` (see :func:`parse_initialization_options`)."""
+
+    code_lens_enabled: bool = True
+    interpreter_path: str | None = None
+
+
+def parse_initialization_options(raw: Any) -> InitializationOptions:
+    """Parse the fixed ``initializationOptions`` shape, leniently.
+
+    Contract shape (missing keys fall back to the defaults shown)::
+
+        { "codeLens": {"enable": true}, "interpreter": {"path": null} }
+
+    Anything unexpected (wrong types, extra keys) is ignored rather than raised.
+    """
+    if not isinstance(raw, dict):
+        return InitializationOptions()
+
+    code_lens_enabled = True
+    code_lens = raw.get("codeLens")
+    if isinstance(code_lens, dict) and "enable" in code_lens:
+        code_lens_enabled = bool(code_lens["enable"])
+
+    interpreter_path: str | None = None
+    interpreter = raw.get("interpreter")
+    if isinstance(interpreter, dict):
+        path = interpreter.get("path")
+        if isinstance(path, str) and path.strip():
+            interpreter_path = path
+
+    return InitializationOptions(
+        code_lens_enabled=code_lens_enabled, interpreter_path=interpreter_path
+    )
+
+
+def latency_log(project_root: Path, elapsed: float) -> tuple[lsp.MessageType, str]:
+    """Return the (message type, text) for a project-check duration log line.
+
+    Info when the check exceeds :data:`LATENCY_WARN_SECONDS`, Log otherwise.
+    """
+    message = f"rextio check {project_root}: {elapsed:.2f}s"
+    msg_type = (
+        lsp.MessageType.Info if elapsed > LATENCY_WARN_SECONDS else lsp.MessageType.Log
+    )
+    return msg_type, message
 
 
 # --------------------------------------------------------------------------- #
@@ -68,14 +141,21 @@ def to_lsp_diagnostic(
     single-sourced ``suggestion`` (the same string the capability manifest
     carries) is appended.
     """
-    position = lsp.Position(
+    start = lsp.Position(
         line=lsp_line(record.line), character=lsp_character(record.column)
     )
+    # Use the real span when the record carries one; else a zero-width range.
+    if record.end_line is not None and record.end_column is not None:
+        end = lsp.Position(
+            line=lsp_line(record.end_line), character=lsp_character(record.end_column)
+        )
+    else:
+        end = start
     message = record.message
     if not degraded and record.suggestion:
         message = f"{record.message}\n\n{record.suggestion}"
     return lsp.Diagnostic(
-        range=lsp.Range(start=position, end=position),
+        range=lsp.Range(start=start, end=end),
         message=message,
         severity=map_severity(record.code, is_rejection=is_rejection),
         code=record.code,
@@ -108,10 +188,32 @@ def function_at_line(
     return None
 
 
+def _guidance_line(
+    code: str, manifest: CapabilityManifest | None, *, degraded: bool
+) -> str:
+    """Render one ``- `CODE` — guidance`` bullet, guidance from the manifest."""
+    guidance = None
+    if not degraded and manifest is not None:
+        rule = manifest.guidance_for(code)
+        if rule is not None and rule.guidance:
+            guidance = rule.guidance
+    return f"- `{code}` — {guidance}" if guidance else f"- `{code}`"
+
+
+def _advisory_codes(fn: FunctionReport) -> list[str]:
+    """Non-rejection diagnostic codes on ``fn`` (informational/advisory), deduped."""
+    rejection = set(fn.rejection_codes)
+    seen: list[str] = []
+    for record in fn.diagnostics:
+        if record.code and record.code not in rejection and record.code not in seen:
+            seen.append(record.code)
+    return seen
+
+
 def build_hover_markdown(
     fn: FunctionReport, manifest: CapabilityManifest | None, *, degraded: bool
 ) -> str:
-    """Render hover markdown: route, native status, and rejection guidance."""
+    """Render hover markdown: route, status, rejection and advisory guidance."""
     lines = [
         f"**Rextio route:** `{fn.route}`",
         f"**Native status:** `{fn.native_status}`",
@@ -120,13 +222,119 @@ def build_hover_markdown(
         lines.append("")
         lines.append("**Rejections:**")
         for code in fn.rejection_codes:
-            guidance = None
-            if not degraded and manifest is not None:
-                rule = manifest.guidance_for(code)
-                if rule is not None and rule.guidance:
-                    guidance = rule.guidance
-            lines.append(f"- `{code}` — {guidance}" if guidance else f"- `{code}`")
+            lines.append(_guidance_line(code, manifest, degraded=degraded))
+    advisory = _advisory_codes(fn)
+    if advisory:
+        lines.append("")
+        lines.append("**Advisory:**")
+        for code in advisory:
+            lines.append(_guidance_line(code, manifest, degraded=degraded))
     return "\n".join(lines)
+
+
+def code_lenses_for(report: ProjectReport, file_path: str) -> list[lsp.CodeLens]:
+    """One route lens per analyzed function definition line in ``file_path``.
+
+    Title is ``Rextio: <route>``; the command is the informational no-op
+    :data:`ROUTE_INFO_COMMAND` carrying ``[qualname]`` as its argument.
+    """
+    lenses: list[lsp.CodeLens] = []
+    for fn in report.functions_in_file(file_path):
+        position = lsp.Position(
+            line=lsp_line(fn.line), character=lsp_character(fn.column)
+        )
+        lenses.append(
+            lsp.CodeLens(
+                range=lsp.Range(start=position, end=position),
+                command=lsp.Command(
+                    title=f"Rextio: {fn.route}",
+                    command=ROUTE_INFO_COMMAND,
+                    arguments=[fn.qualname],
+                ),
+            )
+        )
+    return lenses
+
+
+def find_native_decorator_line(lines: list[str], def_line: int) -> int | None:
+    """Return the 0-based index of the sole ``@rextio.native`` decorator line.
+
+    Scans the contiguous decorator block immediately above the 1-based ``def``
+    line. Returns the index only when exactly one native decorator is present in
+    that block (otherwise ``None``, so no quick fix is offered).
+    """
+    native_indices: list[int] = []
+    idx = def_line - 2  # 0-based line directly above the def
+    while idx >= 0:
+        stripped = lines[idx].strip()
+        if not stripped:
+            break  # a blank line ends the decorator block
+        if not stripped.startswith("@"):
+            break  # a non-decorator statement ends the block
+        if _NATIVE_DECORATOR_RE.match(stripped):
+            native_indices.append(idx)
+        idx -= 1
+    return native_indices[0] if len(native_indices) == 1 else None
+
+
+def _function_for_diagnostic(
+    report: ProjectReport, file_path: str, diagnostic: lsp.Diagnostic
+) -> FunctionReport | None:
+    """Find the function that owns ``diagnostic`` by matching code and line."""
+    for fn in report.functions_in_file(file_path):
+        for record in fn.diagnostics:
+            if record.code == diagnostic.code and lsp_line(record.line) == (
+                diagnostic.range.start.line
+            ):
+                return fn
+    return None
+
+
+def code_actions_for(
+    report: ProjectReport,
+    *,
+    file_path: str,
+    uri: str,
+    document_text: str,
+    context_diagnostics: list[lsp.Diagnostic],
+) -> list[lsp.CodeAction]:
+    """Build quick-fix code actions for the rextio diagnostics in context.
+
+    The only M2 action: for a ``native_status == "rejected"`` function whose def
+    carries exactly one explicit ``@rextio.native`` decorator, offer replacing
+    that decorator with ``@rextio.exempt`` (indentation preserved).
+    """
+    lines = document_text.splitlines()
+    actions: list[lsp.CodeAction] = []
+    seen: set[str] = set()
+    for diagnostic in context_diagnostics:
+        if diagnostic.source != "rextio":
+            continue
+        fn = _function_for_diagnostic(report, file_path, diagnostic)
+        if fn is None or fn.native_status != "rejected" or fn.qualname in seen:
+            continue
+        dec_idx = find_native_decorator_line(lines, fn.line)
+        if dec_idx is None:
+            continue
+        seen.add(fn.qualname)
+        original = lines[dec_idx]
+        indent = original[: len(original) - len(original.lstrip())]
+        edit = lsp.TextEdit(
+            range=lsp.Range(
+                start=lsp.Position(line=dec_idx, character=0),
+                end=lsp.Position(line=dec_idx, character=len(original)),
+            ),
+            new_text=f"{indent}@rextio.exempt",
+        )
+        actions.append(
+            lsp.CodeAction(
+                title=EXEMPT_ACTION_TITLE,
+                kind=lsp.CodeActionKind.QuickFix,
+                diagnostics=[diagnostic],
+                edit=lsp.WorkspaceEdit(changes={uri: [edit]}),
+            )
+        )
+    return actions
 
 
 # --------------------------------------------------------------------------- #
@@ -138,10 +346,77 @@ class RextioLanguageServer(LanguageServer):
     def __init__(self) -> None:
         super().__init__(name="rextio-lsp", version=__version__)
         self.engine = Engine()
+        self.init_options = InitializationOptions()
         self._reports: dict[str, ProjectReport] = {}
         self._degraded: dict[str, bool] = {}
         self._timers: dict[str, threading.Timer] = {}
+        # Last whole-project check duration (seconds), keyed by resolved root.
+        self._last_duration: dict[str, float] = {}
         self._state_lock = threading.Lock()
+
+    # -- initialization ----------------------------------------------------- #
+    def apply_initialization_options(self, raw: Any) -> None:
+        """Parse ``initializationOptions`` and register conditional features.
+
+        Called from the INITIALIZE handler (before capabilities are computed) so
+        that code lens is advertised only when enabled. Code actions are always
+        registered (quick fixes for rextio diagnostics only).
+        """
+        options = parse_initialization_options(raw)
+        self.init_options = options
+        self.engine.interpreter_path = options.interpreter_path
+
+        features = self.protocol.fm.features
+        if lsp.TEXT_DOCUMENT_CODE_ACTION not in features:
+
+            @self.feature(
+                lsp.TEXT_DOCUMENT_CODE_ACTION,
+                lsp.CodeActionOptions(code_action_kinds=[lsp.CodeActionKind.QuickFix]),
+            )
+            def _code_action(
+                ls: RextioLanguageServer, params: lsp.CodeActionParams
+            ) -> list[lsp.CodeAction] | None:
+                return ls.code_action(params)
+
+        if options.code_lens_enabled and lsp.TEXT_DOCUMENT_CODE_LENS not in features:
+
+            @self.feature(lsp.TEXT_DOCUMENT_CODE_LENS)
+            def _code_lens(
+                ls: RextioLanguageServer, params: lsp.CodeLensParams
+            ) -> list[lsp.CodeLens] | None:
+                return ls.code_lens(params)
+
+    def register_watched_files(self) -> None:
+        """Ask the client (if capable) to watch ``**/rextio.toml`` for changes.
+
+        Best-effort dynamic registration; the notification handler works
+        regardless of whether this registration is accepted.
+        """
+        caps = self.client_capabilities
+        workspace = getattr(caps, "workspace", None)
+        watched = getattr(workspace, "did_change_watched_files", None)
+        if not getattr(watched, "dynamic_registration", False):
+            return
+        try:
+            self.client_register_capability(
+                lsp.RegistrationParams(
+                    registrations=[
+                        lsp.Registration(
+                            id="rextio-watch-toml",
+                            method=lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES,
+                            register_options=lsp.DidChangeWatchedFilesRegistrationOptions(
+                                watchers=[
+                                    lsp.FileSystemWatcher(
+                                        glob_pattern=f"**/{CONFIG_FILENAME}"
+                                    )
+                                ]
+                            ),
+                        )
+                    ]
+                )
+            )
+        except Exception:  # noqa: BLE001 -- registration is best-effort
+            logger.debug("client/registerCapability for watched files unavailable")
 
     # -- trigger / debounce ------------------------------------------------- #
     def schedule_analysis_for_uri(self, uri: str) -> None:
@@ -178,7 +453,9 @@ class RextioLanguageServer(LanguageServer):
         # keys and file-path matching agree across symlinks (e.g. macOS
         # /var -> /private/var).
         project_root = project_root.resolve()
+        started = time.perf_counter()
         report = self.engine.check(project_root)
+        self._record_check_duration(project_root, time.perf_counter() - started)
         if report is None:
             logger.info("rextio unavailable for %s; no-op", project_root)
             return None
@@ -244,10 +521,93 @@ class RextioLanguageServer(LanguageServer):
             contents=lsp.MarkupContent(kind=lsp.MarkupKind.Markdown, value=markdown)
         )
 
+    # -- latency ------------------------------------------------------------ #
+    def _record_check_duration(self, project_root: Path, elapsed: float) -> None:
+        """Store the last check duration and log it (Info when slow, else Log)."""
+        self._last_duration[str(project_root)] = elapsed
+        msg_type, message = latency_log(project_root, elapsed)
+        try:
+            self.window_log_message(lsp.LogMessageParams(type=msg_type, message=message))
+        except Exception:  # noqa: BLE001 -- logging must never break analysis
+            logger.debug("window/logMessage unavailable: %s", message)
+
+    # -- code lens ---------------------------------------------------------- #
+    def code_lens(self, params: lsp.CodeLensParams) -> list[lsp.CodeLens] | None:
+        """Return route lenses for the requested document, if analyzed."""
+        result = self._report_and_path_for_uri(params.text_document.uri)
+        if result is None:
+            return None
+        report, resolved = result
+        return code_lenses_for(report, str(resolved))
+
+    # -- code actions ------------------------------------------------------- #
+    def code_action(self, params: lsp.CodeActionParams) -> list[lsp.CodeAction] | None:
+        """Return rextio quick fixes for the diagnostics in the request context."""
+        uri = params.text_document.uri
+        result = self._report_and_path_for_uri(uri)
+        if result is None:
+            return None
+        report, resolved = result
+        document = self.workspace.get_text_document(uri)
+        return code_actions_for(
+            report,
+            file_path=str(resolved),
+            uri=uri,
+            document_text=document.source,
+            context_diagnostics=list(params.context.diagnostics),
+        )
+
+    def _report_and_path_for_uri(
+        self, uri: str
+    ) -> tuple[ProjectReport, Path] | None:
+        """Resolve ``uri`` to (cached-or-fresh report, resolved path) or ``None``."""
+        path = uri_to_path(uri)
+        if path is None:
+            return None
+        resolved = path.resolve()
+        root = find_project_root(resolved)
+        if root is None:
+            return None
+        report = self._reports.get(str(root.resolve()))
+        if report is None:
+            report = self.analyze_project(root)
+            if report is None:
+                return None
+        return report, resolved
+
+    # -- rextio.toml watch -------------------------------------------------- #
+    def handle_watched_files_change(
+        self, params: lsp.DidChangeWatchedFilesParams
+    ) -> None:
+        """On a ``rextio.toml`` change, drop its cache entry and re-analyze."""
+        for change in params.changes:
+            path = uri_to_path(change.uri)
+            if path is None or path.name != CONFIG_FILENAME:
+                continue
+            root = path.parent.resolve()
+            self.engine.invalidate(root)
+            with self._state_lock:
+                self._reports.pop(str(root), None)
+                self._degraded.pop(str(root), None)
+            self._debounce(str(root))
+
 
 def create_server() -> RextioLanguageServer:
-    """Construct the server and register the (narrow) feature handlers."""
+    """Construct the server and register the (narrow) feature handlers.
+
+    Code lens and code actions are registered later, from the INITIALIZE
+    handler, so code lens can be advertised conditionally on
+    ``initializationOptions.codeLens.enable``.
+    """
     server = RextioLanguageServer()
+
+    @server.feature(lsp.INITIALIZE)
+    def _initialize(ls: RextioLanguageServer, params: lsp.InitializeParams) -> None:
+        ls.apply_initialization_options(getattr(params, "initialization_options", None))
+
+    @server.feature(lsp.INITIALIZED)
+    def _initialized(ls: RextioLanguageServer, params: lsp.InitializedParams) -> None:
+        ls.register_watched_files()
 
     @server.feature(lsp.TEXT_DOCUMENT_DID_OPEN)
     def _did_open(ls: RextioLanguageServer, params: lsp.DidOpenTextDocumentParams) -> None:
@@ -262,5 +622,11 @@ def create_server() -> RextioLanguageServer:
     @server.feature(lsp.TEXT_DOCUMENT_HOVER)
     def _hover(ls: RextioLanguageServer, params: lsp.HoverParams) -> lsp.Hover | None:
         return ls.hover_for(params.text_document.uri, params.position)
+
+    @server.feature(lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES)
+    def _watched(
+        ls: RextioLanguageServer, params: lsp.DidChangeWatchedFilesParams
+    ) -> None:
+        ls.handle_watched_files_change(params)
 
     return server

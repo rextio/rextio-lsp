@@ -62,10 +62,12 @@ ROUTE_INFO_COMMAND = "rextio.showRouteInfo"
 
 # Title of the exempt quick fix and the native decorator it rewrites.
 EXEMPT_ACTION_TITLE = "Rextio: keep on Python fallback (@rextio.exempt)"
-# Matches ``@rextio.native`` and any trailing argument list
-# (``@rextio.native(target="rust")``) so the quick fix can replace exactly that
-# token span, preserving indentation and trailing comments.
-_NATIVE_DECORATOR_RE = re.compile(r"@rextio\.native\b(?:\s*\([^)]*\))?")
+# Matches the ``@rextio.native`` decorator token itself (name only). The quick
+# fix computes the argument-list span separately via a paren-balance scan (see
+# :func:`_native_exempt_span`), never a regex: a regex ``[^)]*`` group stops at
+# the first ``)`` and would corrupt nested (``target="rust(builtin)"``) or
+# multi-line argument lists.
+_NATIVE_DECORATOR_RE = re.compile(r"@rextio\.native\b")
 
 
 @dataclass(frozen=True)
@@ -136,18 +138,36 @@ def map_severity(code: str, *, is_rejection: bool) -> lsp.DiagnosticSeverity:
     return lsp.DiagnosticSeverity.Information
 
 
-def _character_at(lines: list[str] | None, contract_line: int, column: int) -> int:
+def _character_at(
+    lines: list[str] | None, contract_line: int, column: int, code: str = ""
+) -> int:
     """LSP character for a contract (1-based line, UTF-8 byte ``column``).
 
     Contract columns are UTF-8 byte offsets; LSP positions default to UTF-16
     code units. When the document's line text is available, convert the byte
     offset accurately (see :func:`utf16_character`); otherwise fall back to the
     raw byte offset (:func:`lsp_character`).
+
+    ``RXT000`` (syntax error) is a documented exception: core emits its column
+    as ``SyntaxError.offset`` -- a **1-based CODE POINT** offset -- not the
+    0-based UTF-8 byte offset every other diagnostic uses. It is special-cased
+    here (subtract 1, clamp, then map code points -> UTF-16 via the line text;
+    without line text, subtract 1 and pass through). This is a core contract
+    inconsistency to be normalized upstream in a future core release; until
+    then the server compensates so RXT000 lands correctly on non-ASCII lines.
     """
+    line_text: str | None = None
     if lines is not None:
         idx = lsp_line(contract_line)
         if 0 <= idx < len(lines):
-            return utf16_character(lines[idx], column)
+            line_text = lines[idx]
+    if code == "RXT000":
+        col0 = max(column - 1, 0)
+        if line_text is not None:
+            return utf16_len(line_text[:col0])
+        return col0
+    if line_text is not None:
+        return utf16_character(line_text, column)
     return lsp_character(column)
 
 
@@ -168,13 +188,15 @@ def to_lsp_diagnostic(
     """
     start = lsp.Position(
         line=lsp_line(record.line),
-        character=_character_at(lines, record.line, record.column),
+        character=_character_at(lines, record.line, record.column, record.code),
     )
     # Use the real span when the record carries one; else a zero-width range.
     if record.end_line is not None and record.end_column is not None:
         end = lsp.Position(
             line=lsp_line(record.end_line),
-            character=_character_at(lines, record.end_line, record.end_column),
+            character=_character_at(
+                lines, record.end_line, record.end_column, record.code
+            ),
         )
     else:
         end = start
@@ -203,15 +225,16 @@ def diagnostics_for_file(
     (e.g. a syntax-error ``RXT000``) whose ``file_path`` matches -- these produce
     zero functions, so without them the file would publish nothing. Top-level
     records are de-duplicated against per-function diagnostics on
-    ``(code, line, column)``.
+    ``(code, line, column, message)`` -- the message is part of the key so two
+    distinct diagnostics that share a code and position are not collapsed.
     """
     diagnostics: list[lsp.Diagnostic] = []
-    covered: set[tuple[str, int, int]] = set()
+    covered: set[tuple[str, int, int, str]] = set()
     for fn in report.functions_in_file(file_path):
         rejection_codes = set(fn.rejection_codes)
         for record in fn.diagnostics:
             is_rejection = fn.native_status == "rejected" and record.code in rejection_codes
-            covered.add((record.code, record.line, record.column))
+            covered.add((record.code, record.line, record.column, record.message))
             diagnostics.append(
                 to_lsp_diagnostic(
                     record, is_rejection=is_rejection, degraded=degraded, lines=lines
@@ -220,7 +243,7 @@ def diagnostics_for_file(
     for record in report.top_level_diagnostics:
         if record.file_path != file_path:
             continue
-        key = (record.code, record.line, record.column)
+        key = (record.code, record.line, record.column, record.message)
         if key in covered:
             continue
         covered.add(key)
@@ -365,6 +388,39 @@ def find_native_decorator_line(lines: list[str], def_line: int) -> int | None:
     return native_indices[0] if len(native_indices) == 1 else None
 
 
+def _native_exempt_span(line: str) -> tuple[int, int] | None:
+    """Char span of ``@rextio.native`` + its single-line arg list on ``line``.
+
+    Returns the ``(start, end)`` slice to replace with ``@rextio.exempt``:
+
+    * a bare decorator (no argument list, e.g. ``@rextio.native  # note``) spans
+      only the token, leaving any trailing comment untouched;
+    * an argument list is bounded by a paren-balance scan from the opening ``(``
+      (so ``target="rust(builtin)"`` and ``target=f(x)`` are handled), not a
+      regex that would stop at the first ``)``;
+    * an argument list that does NOT close on this line (multi-line) returns
+      ``None`` -- the quick fix is withheld rather than emit a corrupting edit.
+    """
+    match = _NATIVE_DECORATOR_RE.search(line)
+    if match is None:
+        return None
+    start, after_token = match.start(), match.end()
+    j = after_token
+    while j < len(line) and line[j] in " \t":
+        j += 1
+    if j >= len(line) or line[j] != "(":
+        return start, after_token  # bare decorator: replace only the token
+    balance = 0
+    for k in range(j, len(line)):
+        if line[k] == "(":
+            balance += 1
+        elif line[k] == ")":
+            balance -= 1
+            if balance == 0:
+                return start, k + 1
+    return None  # opening paren never closed -> multi-line arg list
+
+
 def _function_for_diagnostic(
     report: ProjectReport, file_path: str, diagnostic: lsp.Diagnostic
 ) -> FunctionReport | None:
@@ -405,19 +461,23 @@ def code_actions_for(
         if dec_idx is None:
             continue
         original = lines[dec_idx]
-        match = _NATIVE_DECORATOR_RE.search(original)
-        if match is None:  # pragma: no cover -- dec_idx implies a match
+        span = _native_exempt_span(original)
+        if span is None:
+            # No token match, or a multi-line argument list whose span cannot be
+            # replaced on a single line without corrupting code: withhold the fix.
             continue
+        start_char, end_char = span
         seen.add(fn.qualname)
-        # Replace only the matched decorator token span (``@rextio.native`` plus
-        # any ``(...)`` args) so indentation and trailing comments are preserved.
+        # Replace only the decorator token span (``@rextio.native`` plus any
+        # single-line ``(...)`` args) so indentation and trailing comments are
+        # preserved.
         edit = lsp.TextEdit(
             range=lsp.Range(
                 start=lsp.Position(
-                    line=dec_idx, character=utf16_len(original[: match.start()])
+                    line=dec_idx, character=utf16_len(original[:start_char])
                 ),
                 end=lsp.Position(
-                    line=dec_idx, character=utf16_len(original[: match.end()])
+                    line=dec_idx, character=utf16_len(original[:end_char])
                 ),
             ),
             new_text="@rextio.exempt",
@@ -451,6 +511,21 @@ class RextioLanguageServer(LanguageServer):
         # URIs the server last published diagnostics for, per resolved root, so
         # stale diagnostics can be cleared exactly (see _set_published/_clear).
         self._published_uris: dict[str, set[str]] = {}
+        # Current owning root (key) of each published URI. A doc whose owning
+        # root changes (a nested rextio.toml appears) must not have its fresh
+        # diagnostics wiped by the old root's next clear pass -- clearing skips a
+        # URI now owned by a different root (see _set_published/_clear_project).
+        self._uri_owner: dict[str, str] = {}
+        # Synthetic project-scope URIs (a project's rextio.toml carrying
+        # top-level diagnostics), keyed by root. Tracked so handle_did_close does
+        # not wipe project-scope diagnostics when the toml document is closed.
+        self._project_scope_uris: dict[str, str] = {}
+        # Per-root analysis generation. Bumped under _state_lock on every toml
+        # Changed/Deleted and in _clear_project; a _run_analysis captures the
+        # generation before analyzing and discards its result (no store, no
+        # publish) if the generation moved mid-run -- so a deleted-toml clear is
+        # never overwritten by an analysis already in flight for that root.
+        self._generation: dict[str, int] = {}
         # Roots with an analysis currently running, and roots whose debounce
         # fired while one was running (re-armed when it finishes) -- the
         # in-flight guard that stops duplicate concurrent analyses.
@@ -555,8 +630,9 @@ class RextioLanguageServer(LanguageServer):
                 self._rerun_pending.add(root)
                 return
             self._analyzing.add(root)
+            generation = self._generation.get(root, 0)
         try:
-            self.analyze_project(Path(root))
+            self.analyze_project(Path(root), generation=generation)
         except Exception:  # noqa: BLE001 -- analysis must never crash the server
             logger.exception("analysis failed for %s", root)
         finally:
@@ -567,8 +643,19 @@ class RextioLanguageServer(LanguageServer):
             if rerun:
                 self._debounce(root)
 
-    def analyze_project(self, project_root: Path) -> ProjectReport | None:
-        """Run a whole-project check and publish diagnostics for open docs."""
+    def analyze_project(
+        self, project_root: Path, *, generation: int | None = None
+    ) -> ProjectReport | None:
+        """Run a whole-project check and publish diagnostics for open docs.
+
+        ``generation`` is the per-root analysis generation captured before this
+        run started (see :attr:`_generation`). When supplied, the result is
+        discarded -- no report stored, nothing published -- if the generation
+        moved while ``engine.check`` was running (the toml was changed or
+        deleted mid-run), so an in-flight analysis can never resurrect stale
+        diagnostics after a clear. ``None`` (direct callers/tests) skips the
+        guard.
+        """
         # rextio emits fully-resolved absolute paths; resolve here too so cache
         # keys and file-path matching agree across symlinks (e.g. macOS
         # /var -> /private/var).
@@ -576,6 +663,15 @@ class RextioLanguageServer(LanguageServer):
         started = time.perf_counter()
         report = self.engine.check(project_root)
         self._record_check_duration(project_root, time.perf_counter() - started)
+        if generation is not None:
+            with self._state_lock:
+                stale = self._generation.get(str(project_root), 0) != generation
+            if stale:
+                logger.info(
+                    "discarding stale analysis for %s (rextio.toml changed mid-run)",
+                    project_root,
+                )
+                return None
         if report is None:
             # A previously-analyzed root that now returns nothing (rextio became
             # unavailable): drop its cached state and clear its diagnostics so
@@ -621,14 +717,22 @@ class RextioLanguageServer(LanguageServer):
             published.add(doc.uri)
 
         # Project-scope diagnostics (top-level, no file_path) attach to the
-        # project's rextio.toml since there is no source file to carry them.
+        # project's rextio.toml since there is no source file to carry them. The
+        # toml URI is a synthetic target (tracked in _project_scope_uris) so
+        # closing the toml document does not wipe these -- see handle_did_close.
         scope = project_scope_diagnostics(report, degraded=degraded)
+        key = str(project_root)
         if scope:
             toml_uri = (project_root / CONFIG_FILENAME).as_uri()
             self._publish(toml_uri, scope)
             published.add(toml_uri)
+            with self._state_lock:
+                self._project_scope_uris[key] = toml_uri
+        else:
+            with self._state_lock:
+                self._project_scope_uris.pop(key, None)
 
-        self._set_published(str(project_root), published)
+        self._set_published(key, published)
 
     # -- publish tracking / clearing --------------------------------------- #
     def _publish(self, uri: str, diagnostics: list[lsp.Diagnostic]) -> None:
@@ -637,28 +741,64 @@ class RextioLanguageServer(LanguageServer):
         )
 
     def _set_published(self, root_key: str, uris: set[str]) -> None:
-        """Record the URIs published for a root, clearing any it dropped."""
+        """Record the URIs published for a root, clearing any it dropped.
+
+        A dropped URI now owned by a *different* root (a doc that migrated to a
+        newly-appeared nested root) is NOT cleared: its fresh diagnostics belong
+        to the new owner. Only URIs still owned by this root are cleared.
+        """
         with self._state_lock:
             previous = self._published_uris.get(root_key, set())
             self._published_uris[root_key] = set(uris)
-        for uri in previous - uris:
+            for uri in uris:
+                self._uri_owner[uri] = root_key
+            to_clear: list[str] = []
+            for uri in previous - uris:
+                # Clear unless the URI is now owned by a DIFFERENT root (a
+                # migrated doc); an unrecorded owner defaults to this root.
+                if self._uri_owner.get(uri, root_key) == root_key:
+                    self._uri_owner.pop(uri, None)
+                    to_clear.append(uri)
+        for uri in to_clear:
             self._publish(uri, [])
 
     def _clear_project(self, project_root: Path) -> None:
-        """Drop cached state for a root and clear every URI it last published."""
+        """Drop cached state for a root and clear every URI it last published.
+
+        Bumps the root's analysis generation so any in-flight analysis discards
+        its result instead of re-publishing (see :meth:`analyze_project`). A URI
+        now owned by a different root is left intact.
+        """
         key = str(project_root)
         with self._state_lock:
             self._reports.pop(key, None)
             self._degraded.pop(key, None)
+            self._project_scope_uris.pop(key, None)
+            self._generation[key] = self._generation.get(key, 0) + 1
             previous = self._published_uris.pop(key, set())
-        for uri in previous:
+            to_clear: list[str] = []
+            for uri in previous:
+                # An unrecorded owner defaults to this root (clearable); only a
+                # URI now owned by a different root is left intact.
+                if self._uri_owner.get(uri, key) == key:
+                    self._uri_owner.pop(uri, None)
+                    to_clear.append(uri)
+        for uri in to_clear:
             self._publish(uri, [])
 
     def handle_did_close(self, uri: str) -> None:
-        """Clear diagnostics for a closed document and forget its publish record."""
+        """Clear diagnostics for a closed document and forget its publish record.
+
+        A synthetic project-scope URI (a rextio.toml carrying project-level
+        diagnostics) is exempt: closing the toml document must not wipe those
+        diagnostics, so the publish record and ownership are left intact.
+        """
         with self._state_lock:
+            if uri in self._project_scope_uris.values():
+                return
             for uris in self._published_uris.values():
                 uris.discard(uri)
+            self._uri_owner.pop(uri, None)
         self._publish(uri, [])
 
     # -- hover -------------------------------------------------------------- #
@@ -755,23 +895,32 @@ class RextioLanguageServer(LanguageServer):
         """On a ``rextio.toml`` change, drop its cache entry and re-analyze.
 
         A deletion instead clears the project entirely: its manifest cache is
-        dropped and its published diagnostics are cleared (the root is no longer
-        a rextio project), rather than re-debouncing an analysis that would
-        no-op.
+        dropped, any pending debounce timer is cancelled, and its published
+        diagnostics are cleared (the root is no longer a rextio project), rather
+        than re-debouncing an analysis that would no-op. Both branches bump the
+        root's analysis generation so an analysis already in flight for that
+        root discards its (now stale) result instead of re-publishing.
         """
         for change in params.changes:
             path = uri_to_path(change.uri)
             if path is None or path.name != CONFIG_FILENAME:
                 continue
             root = path.parent.resolve()
+            key = str(root)
             self.engine.invalidate(root)
             if change.type == lsp.FileChangeType.Deleted:
-                self._clear_project(root)
+                with self._state_lock:
+                    timer = self._timers.pop(key, None)
+                    self._rerun_pending.discard(key)
+                if timer is not None:
+                    timer.cancel()
+                self._clear_project(root)  # bumps generation, clears diagnostics
                 continue
             with self._state_lock:
-                self._reports.pop(str(root), None)
-                self._degraded.pop(str(root), None)
-            self._debounce(str(root))
+                self._reports.pop(key, None)
+                self._degraded.pop(key, None)
+                self._generation[key] = self._generation.get(key, 0) + 1
+            self._debounce(key)
 
 
 def create_server() -> RextioLanguageServer:

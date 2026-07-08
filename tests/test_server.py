@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -842,8 +843,9 @@ def test_multi_root_publish_isolation(tmp_path, monkeypatch):
 def test_diagnostics_for_file_converts_byte_offset_to_utf16():
     module = "/p/m.py"
     line = 'x = "한글" + f(1)'  # `f` at UTF-8 byte 15, UTF-16 index 11
+    # a non-RXT000 code: column is a 0-based UTF-8 byte offset
     record = {
-        "code": "RXT000",
+        "code": "RXT070",
         "message": "m",
         "severity": "error",
         "file_path": module,
@@ -856,6 +858,46 @@ def test_diagnostics_for_file_converts_byte_offset_to_utf16():
     # with the document line -> converted to the UTF-16 index
     converted = diagnostics_for_file(report, module, degraded=False, lines=[line])
     assert converted[0].range.start.character == 11
+
+
+def test_diagnostics_for_file_rxt000_column_is_one_based_code_point():
+    # RXT000 (syntax error) carries column == SyntaxError.offset: a 1-based CODE
+    # POINT offset, not the byte offset every other code uses (fix #6).
+    module = "/p/m.py"
+    # a non-BMP char (𝐀 = U+1D400) makes code-point and UTF-16 indices diverge:
+    # the def-error column points just past the opening paren.
+    line = "𝐀 = ("  # code points: 𝐀(0) ' '(1) =(2) ' '(3) ((4)
+    record = {
+        "code": "RXT000",
+        "message": "invalid syntax",
+        "severity": "error",
+        "file_path": module,
+        "line": 1,
+        "column": 5,  # 1-based code point -> 4th code point (the '(')
+    }
+    report = parse_check_report({"contract_version": "1.0.0", "diagnostics": [record]})
+    # without line text: subtract 1, pass through (4 code points)
+    assert diagnostics_for_file(report, module, degraded=False)[0].range.start.character == 4
+    # with line text: 4 code points -> 5 UTF-16 units (𝐀 is a surrogate pair)
+    converted = diagnostics_for_file(report, module, degraded=False, lines=[line])
+    assert converted[0].range.start.character == 5
+
+
+def test_diagnostics_for_file_rxt000_ascii_line_placement():
+    # RXT000 on a plain ASCII line still lands correctly (1-based -> 0-based).
+    module = "/p/m.py"
+    line = "def broken("  # offset 11 (1-based) points just past the '('
+    record = {
+        "code": "RXT000",
+        "message": "invalid syntax",
+        "severity": "error",
+        "file_path": module,
+        "line": 1,
+        "column": 11,
+    }
+    report = parse_check_report({"contract_version": "1.0.0", "diagnostics": [record]})
+    converted = diagnostics_for_file(report, module, degraded=False, lines=[line])
+    assert converted[0].range.start.character == 10  # 11th char, 0-based
 
 
 # --------------------------------------------------------------------------- #
@@ -908,6 +950,66 @@ def test_code_action_replaces_native_with_target_arg():
     assert _apply(text, edit) == "@rextio.exempt"
 
 
+def _exempt_edit_apply(text: str) -> list:
+    """Run the exempt quick fix over ``text`` (one rejected fn on line 2)."""
+    module = "/proj/ops.py"
+    report = _rejected_report(module, def_line=2, diag_line=3)
+    diags = diagnostics_for_file(report, module, degraded=False)
+    return code_actions_for(
+        report,
+        file_path=module,
+        uri="file:///proj/ops.py",
+        document_text=text,
+        context_diagnostics=diags,
+    )
+
+
+def test_code_action_replaces_native_with_nested_paren_string_arg():
+    # a `)` inside a string literal must not truncate the span (fix #4a):
+    # regex `[^)]*` would stop early and yield a broken `@rextio.exempt")`.
+    text = (
+        '@rextio.native(target="rust(builtin)")\n'
+        "def rejected(xs: list[int]) -> int:\n"
+        "    return helper(xs)\n"
+    )
+    (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
+    assert _apply(text, edit) == "@rextio.exempt"
+
+
+def test_code_action_replaces_native_with_call_arg():
+    # a nested call `f(x)` in the argument list is spanned by paren balance.
+    text = (
+        "@rextio.native(target=f(x))\n"
+        "def rejected(xs: list[int]) -> int:\n"
+        "    return helper(xs)\n"
+    )
+    (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
+    assert _apply(text, edit) == "@rextio.exempt"
+
+
+def test_code_action_absent_for_multiline_native_args():
+    # a MULTI-LINE @rextio.native(...) argument list: the fix is withheld rather
+    # than emit an edit that leaves dangling continuation lines (fix #4b).
+    module = "/proj/ops.py"
+    text = (
+        "@rextio.native(\n"
+        '    target="rust",\n'
+        ")\n"
+        "def rejected(xs: list[int]) -> int:\n"
+        "    return helper(xs)\n"
+    )
+    report = _rejected_report(module, def_line=4, diag_line=5)
+    diags = diagnostics_for_file(report, module, degraded=False)
+    actions = code_actions_for(
+        report,
+        file_path=module,
+        uri="file:///proj/ops.py",
+        document_text=text,
+        context_diagnostics=diags,
+    )
+    assert actions == []
+
+
 # --------------------------------------------------------------------------- #
 # Multi-line decorator tolerance in the quick-fix scan (fix #10).
 # --------------------------------------------------------------------------- #
@@ -926,3 +1028,241 @@ def test_find_native_decorator_not_counted_inside_paren_args():
 def test_find_native_decorator_class_method_without_blank_line():
     lines = ["class C:", "    @rextio.native", "    def m(self):", "        pass"]
     assert find_native_decorator_line(lines, 3) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Top-level dedupe key includes the message (fix #9).
+# --------------------------------------------------------------------------- #
+def test_diagnostics_for_file_keeps_distinct_messages_at_same_position():
+    module = "/proj/m.py"
+    at = {"file_path": module, "line": 5, "column": 4, "severity": "error"}
+    report = parse_check_report(
+        {
+            "contract_version": "1.0.0",
+            # a top-level record sharing code + position but a DIFFERENT message
+            "diagnostics": [{"code": "RXT070", "message": "second", **at}],
+            "modules": [
+                {
+                    "file_path": module,
+                    "functions": [
+                        {
+                            "qualname": "m.f",
+                            "name": "f",
+                            "file_path": module,
+                            "line": 5,
+                            "column": 0,
+                            "route": "fallback-python",
+                            "native_status": "rejected",
+                            "rejection_codes": ["RXT070"],
+                            "diagnostics": [{"code": "RXT070", "message": "first", **at}],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    diags = diagnostics_for_file(report, module, degraded=False)
+    # both are kept: the message is part of the dedupe key, so the distinct
+    # top-level record is not collapsed into the function's.
+    assert sorted(d.message.split("\n")[0] for d in diags) == ["first", "second"]
+
+
+# --------------------------------------------------------------------------- #
+# didClose on rextio.toml keeps project-scope diagnostics (fix #5).
+# --------------------------------------------------------------------------- #
+def test_did_close_toml_keeps_project_scope_diagnostics(tmp_path, monkeypatch):
+    (tmp_path / "rextio.toml").write_text("[build]\n", encoding="utf-8")
+    root = tmp_path.resolve()
+    server = RextioLanguageServer()
+    _setup_workspace(server)  # no open docs
+    published = _capture_publishes(server, monkeypatch)
+    report = parse_check_report(
+        {
+            "contract_version": "1.0.0",
+            "project_root": str(root),
+            "diagnostics": [
+                {
+                    "code": "RXT091",
+                    "message": "project-scope note",
+                    "severity": "info",
+                    "file_path": "",
+                    "line": 1,
+                    "column": 0,
+                }
+            ],
+        }
+    )
+    server._publish_for_project(root, report, degraded=False)
+    toml_uri = (root / "rextio.toml").as_uri()
+    assert [d.code for d in published[toml_uri]] == ["RXT091"]
+
+    # closing the toml document must NOT wipe the project-scope diagnostics
+    published.clear()
+    server.handle_did_close(toml_uri)
+    assert toml_uri not in published  # never cleared
+    assert toml_uri in server._published_uris[str(root)]  # publish record intact
+
+
+# --------------------------------------------------------------------------- #
+# Project-switch URI ownership (fix #7).
+# --------------------------------------------------------------------------- #
+def test_migrated_uri_not_cleared_by_old_root(tmp_path, monkeypatch):
+    # a doc's URI migrated from root A to a newly-appeared nested root B (which
+    # published first). A's next clear pass must skip the URI now owned by B.
+    a = tmp_path / "a"
+    b = a / "nested"
+    a.mkdir()
+    b.mkdir()
+    a_root, b_root = a.resolve(), b.resolve()
+    doc_uri = (b / "mod.py").as_uri()
+    server = RextioLanguageServer()
+    published = _capture_publishes(server, monkeypatch)
+    # B already published and owns the URI
+    server._published_uris[str(b_root)] = {doc_uri}
+    server._uri_owner[doc_uri] = str(b_root)
+    # A had published the same URI before the nested toml appeared
+    server._published_uris[str(a_root)] = {doc_uri}
+
+    # A re-analyzes and no longer owns the URI (doc migrated to B)
+    server._set_published(str(a_root), set())
+
+    assert doc_uri not in published  # B's fresh diagnostics NOT wiped
+    assert server._uri_owner[doc_uri] == str(b_root)  # ownership intact
+
+
+# --------------------------------------------------------------------------- #
+# Deleted-toml vs in-flight analysis race: generation guard (fix #1).
+# --------------------------------------------------------------------------- #
+def _one_rejection_report(root: Path, module: Path) -> "object":
+    return parse_check_report(
+        {
+            "contract_version": "1.0.0",
+            "project_root": str(root),
+            "modules": [
+                {
+                    "file_path": str(module),
+                    "functions": [
+                        {
+                            "qualname": "ops.rejected",
+                            "name": "rejected",
+                            "file_path": str(module),
+                            "line": 1,
+                            "column": 0,
+                            "route": "fallback-python",
+                            "native_status": "rejected",
+                            "rejection_codes": ["RXT070"],
+                            "diagnostics": [
+                                {
+                                    "code": "RXT070",
+                                    "message": "m",
+                                    "severity": "error",
+                                    "file_path": str(module),
+                                    "line": 1,
+                                    "column": 0,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
+def test_deleted_toml_discards_in_flight_analysis(tmp_path, monkeypatch):
+    (tmp_path / "rextio.toml").write_text("[build]\n", encoding="utf-8")
+    root = tmp_path.resolve()
+    module = root / "ops.py"
+    module.write_text("x = 1\n", encoding="utf-8")
+    server = RextioLanguageServer()
+    _setup_workspace(server, (module.as_uri(), "x = 1\n"))
+    published = _capture_publishes(server, monkeypatch)
+    monkeypatch.setattr(server, "window_log_message", lambda _p: None)
+
+    # simulate an earlier completed run: the module URI is published + owned
+    server._published_uris[str(root)] = {module.as_uri()}
+    server._uri_owner[module.as_uri()] = str(root)
+
+    started = threading.Event()
+    release = threading.Event()
+    report = _one_rejection_report(root, module)
+
+    def blocking_check(_root):
+        started.set()
+        release.wait(3.0)
+        return report
+
+    monkeypatch.setattr(server.engine, "check", blocking_check)
+
+    worker = threading.Thread(target=server._run_analysis, args=(str(root),))
+    worker.start()
+    assert started.wait(3.0)  # analysis is now blocked mid-run
+
+    # the toml is deleted while the analysis is in flight
+    params = lsp.DidChangeWatchedFilesParams(
+        changes=[
+            lsp.FileEvent(
+                uri=(root / "rextio.toml").as_uri(), type=lsp.FileChangeType.Deleted
+            )
+        ]
+    )
+    server.handle_watched_files_change(params)
+    assert published[module.as_uri()] == []  # cleared by the deletion
+
+    release.set()  # let the stale analysis finish
+    worker.join(3.0)
+    assert not worker.is_alive()
+
+    # the late result was discarded: no report stored, diagnostics stay cleared
+    assert str(root) not in server._reports
+    assert published[module.as_uri()] == []
+
+
+def test_changed_toml_midrun_ends_with_fresh_rerun(tmp_path, monkeypatch):
+    (tmp_path / "rextio.toml").write_text("[build]\n", encoding="utf-8")
+    root = tmp_path.resolve()
+    module = root / "ops.py"
+    module.write_text("x = 1\n", encoding="utf-8")
+    server = RextioLanguageServer()
+    _setup_workspace(server, (module.as_uri(), "x = 1\n"))
+    _capture_publishes(server, monkeypatch)
+    monkeypatch.setattr(server, "window_log_message", lambda _p: None)
+    monkeypatch.setattr("rextio_lsp.server.DEBOUNCE_SECONDS", 0.02)
+
+    stale_report = _one_rejection_report(root, module)
+    fresh_report = _one_rejection_report(root, module)
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+
+    def check_seq(_root):
+        calls.append(1)
+        if len(calls) == 1:
+            started.set()
+            release.wait(3.0)
+            return stale_report  # in-flight when the toml changes -> discarded
+        return fresh_report
+
+    monkeypatch.setattr(server.engine, "check", check_seq)
+
+    worker = threading.Thread(target=server._run_analysis, args=(str(root),))
+    worker.start()
+    assert started.wait(3.0)
+
+    # a Changed event mid-run bumps the generation and debounces a fresh re-run
+    params = lsp.DidChangeWatchedFilesParams(
+        changes=[
+            lsp.FileEvent(
+                uri=(root / "rextio.toml").as_uri(), type=lsp.FileChangeType.Changed
+            )
+        ]
+    )
+    server.handle_watched_files_change(params)
+    release.set()
+    worker.join(3.0)
+
+    # wait for the debounced fresh re-run to store its result
+    deadline = time.time() + 3.0
+    while time.time() < deadline and server._reports.get(str(root)) is not fresh_report:
+        time.sleep(0.02)
+    assert server._reports.get(str(root)) is fresh_report  # not the stale one

@@ -116,6 +116,75 @@ def test_parse_check_report_captures_top_level_diagnostics(check_syntax_error):
     assert diag.file_path == "/proj/src/broken/bad.py"
 
 
+def test_parse_tolerates_null_line_and_column():
+    # Core serializes SyntaxError.lineno/offset verbatim into RXT000, and CPython
+    # can emit an explicit null for either (e.g. source with a NUL byte). A null
+    # must fall back to the defaults instead of raising TypeError and aborting the
+    # WHOLE report parse.
+    report = parse_check_report(
+        {
+            "contract_version": "1.0.0",
+            "diagnostics": [
+                {
+                    "code": "RXT000",
+                    "message": "invalid syntax",
+                    "severity": "error",
+                    "file_path": "/proj/bad.py",
+                    "line": None,
+                    "column": None,
+                }
+            ],
+        }
+    )
+    assert len(report.top_level_diagnostics) == 1
+    diag = report.top_level_diagnostics[0]
+    assert diag.line == 1  # null line -> default 1
+    assert diag.column == 0  # null column -> default 0
+
+
+def test_parse_tolerates_junk_column_and_function_position():
+    # A non-int-coercible junk column is tolerated (default 0), and null/junk
+    # positions on a FUNCTION record fall back too rather than aborting the parse.
+    report = parse_check_report(
+        {
+            "contract_version": "1.0.0",
+            "modules": [
+                {
+                    "file_path": "/proj/ops.py",
+                    "functions": [
+                        {
+                            "qualname": "ops.f",
+                            "name": "f",
+                            "file_path": "/proj/ops.py",
+                            "line": None,
+                            "column": "nope",
+                            "route": "fallback-python",
+                            "native_status": "rejected",
+                            "rejection_codes": ["RXT070"],
+                            "diagnostics": [
+                                {
+                                    "code": "RXT070",
+                                    "message": "m",
+                                    "severity": "error",
+                                    "file_path": "/proj/ops.py",
+                                    "line": 3,
+                                    "column": "junk",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    (fn,) = report.functions
+    assert fn.line == 1  # null line -> default 1
+    assert fn.column == 0  # junk column -> default 0
+    (diag,) = fn.diagnostics
+    assert diag.column == 0  # junk column -> default 0
+    assert diag.line == 3  # a valid position is preserved
+
+
 # --------------------------------------------------------------------------- #
 # UTF-8 byte offset -> UTF-16 code unit conversion.
 # --------------------------------------------------------------------------- #

@@ -156,6 +156,11 @@ def _character_at(
     inconsistency to be normalized upstream in a future core release; until
     then the server compensates so RXT000 lands correctly on non-ASCII lines.
     """
+    # Defensive: the parse now coerces a null/junk column to 0 (see
+    # contract._int_or), but guard here too so a None can never reach the
+    # arithmetic below (int(None) - 1 would raise).
+    if column is None:
+        column = 0
     line_text: str | None = None
     if lines is not None:
         idx = lsp_line(contract_line)
@@ -395,11 +400,15 @@ def _native_exempt_span(line: str) -> tuple[int, int] | None:
 
     * a bare decorator (no argument list, e.g. ``@rextio.native  # note``) spans
       only the token, leaving any trailing comment untouched;
-    * an argument list is bounded by a paren-balance scan from the opening ``(``
-      (so ``target="rust(builtin)"`` and ``target=f(x)`` are handled), not a
-      regex that would stop at the first ``)``;
-    * an argument list that does NOT close on this line (multi-line) returns
-      ``None`` -- the quick fix is withheld rather than emit a corrupting edit.
+    * an argument list is bounded by a quote-aware paren-balance scan from the
+      opening ``(``: parens inside string literals do not affect balance, so
+      ``target="a)b"`` and ``target="rust(builtin)"`` span the real close, not a
+      regex (or naive scan) that would stop at the first in-string ``)``;
+    * an argument list that does NOT close on this line (multi-line), or a line
+      with an unterminated string literal, returns ``None`` -- the quick fix is
+      withheld rather than emit a corrupting edit. Decorator args here are
+      single-line by construction (multi-line is already withheld above), so no
+      triple-quote handling is needed.
     """
     match = _NATIVE_DECORATOR_RE.search(line)
     if match is None:
@@ -411,14 +420,31 @@ def _native_exempt_span(line: str) -> tuple[int, int] | None:
     if j >= len(line) or line[j] != "(":
         return start, after_token  # bare decorator: replace only the token
     balance = 0
+    quote: str | None = None
+    escaped = False
     for k in range(j, len(line)):
-        if line[k] == "(":
+        ch = line[k]
+        if quote is not None:
+            # Inside a string literal: parens do not affect balance; only the
+            # matching unescaped quote closes it (honor backslash escapes).
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch == "(":
             balance += 1
-        elif line[k] == ")":
+        elif ch == ")":
             balance -= 1
             if balance == 0:
                 return start, k + 1
-    return None  # opening paren never closed -> multi-line arg list
+    # Unclosed paren (multi-line arg list) or an unterminated string on the line:
+    # ambiguous, so withhold the fix rather than guess a span.
+    return None
 
 
 def _function_for_diagnostic(
@@ -660,12 +686,16 @@ class RextioLanguageServer(LanguageServer):
         # keys and file-path matching agree across symlinks (e.g. macOS
         # /var -> /private/var).
         project_root = project_root.resolve()
+        key = str(project_root)
         started = time.perf_counter()
         report = self.engine.check(project_root)
         self._record_check_duration(project_root, time.perf_counter() - started)
+        # Early gate: a cheap fast-path discard when the toml changed/was deleted
+        # while ``engine.check`` ran. The authoritative gate is the final one
+        # below (this one just avoids the work in between when already stale).
         if generation is not None:
             with self._state_lock:
-                stale = self._generation.get(str(project_root), 0) != generation
+                stale = self._generation.get(key, 0) != generation
             if stale:
                 logger.info(
                     "discarding stale analysis for %s (rextio.toml changed mid-run)",
@@ -687,13 +717,33 @@ class RextioLanguageServer(LanguageServer):
                 report.contract_version,
                 project_root,
             )
-        with self._state_lock:
-            self._reports[str(project_root)] = report
-            self._degraded[str(project_root)] = degraded
 
-        # Warm the guidance manifest (used by hover); skipped when degraded.
+        # Warm the guidance manifest (used by hover) BEFORE the final gate: the
+        # manifest is cache-keyed by the current config, so warming even when the
+        # config may already have changed is harmless -- and doing it here keeps
+        # the final gate the LAST thing before the store, so this potentially
+        # slow acquisition cannot run *after* the gate and re-open the race.
         if not degraded:
             self.engine.capabilities(project_root)
+
+        # Final generation gate. Invariant: once the generation has moved -- a
+        # toml Changed/Deleted landed while this analysis was in flight, INCLUDING
+        # during the capabilities warm above -- we neither store the report nor
+        # publish its diagnostics. The re-check and the store are one atomic step
+        # under ``_state_lock``, so a bump cannot slip between them. Combined with
+        # the early gate, an in-flight analysis can never resurrect stale
+        # diagnostics after a clear.
+        with self._state_lock:
+            stale = generation is not None and self._generation.get(key, 0) != generation
+            if not stale:
+                self._reports[key] = report
+                self._degraded[key] = degraded
+        if stale:
+            logger.info(
+                "discarding stale analysis for %s (rextio.toml changed mid-run)",
+                project_root,
+            )
+            return None
 
         self._publish_for_project(project_root, report, degraded=degraded)
         return report

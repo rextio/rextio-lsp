@@ -210,14 +210,28 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _int_or(value: Any, default: int) -> int:
+    """Coerce a raw contract value to ``int``, or ``default`` for junk/None.
+
+    An explicit JSON ``null`` (``line``/``column`` can both be ``None`` -- core
+    serializes ``SyntaxError.lineno``/``offset`` verbatim into RXT000 and CPython
+    can emit ``None`` for either, e.g. source containing a NUL byte) reaches
+    ``int(None)`` and raises ``TypeError``, which would abort the whole report
+    parse. This tolerant coercion falls back to ``default`` instead so one
+    malformed position never discards every diagnostic for the project.
+    """
+    coerced = _optional_int(value)
+    return default if coerced is None else coerced
+
+
 def _parse_diagnostic(raw: dict[str, Any]) -> DiagnosticRecord:
     return DiagnosticRecord(
         code=str(raw.get("code", "")),
         message=str(raw.get("message", "")),
         severity=str(raw.get("severity", "")),
         file_path=str(raw.get("file_path", "")),
-        line=int(raw.get("line", 1)),
-        column=int(raw.get("column", 0)),
+        line=_int_or(raw.get("line"), 1),
+        column=_int_or(raw.get("column"), 0),
         function_name=raw.get("function_name"),
         suggestion=raw.get("suggestion"),
         end_line=_optional_int(raw.get("end_line")),
@@ -230,8 +244,8 @@ def _parse_function(raw: dict[str, Any]) -> FunctionReport:
         qualname=str(raw.get("qualname", raw.get("name", ""))),
         name=str(raw.get("name", "")),
         file_path=str(raw.get("file_path", "")),
-        line=int(raw.get("line", 1)),
-        column=int(raw.get("column", 0)),
+        line=_int_or(raw.get("line"), 1),
+        column=_int_or(raw.get("column"), 0),
         route=str(raw.get("route", "")),
         native_status=str(raw.get("native_status", "")),
         rejection_codes=tuple(str(c) for c in raw.get("rejection_codes", ()) or ()),

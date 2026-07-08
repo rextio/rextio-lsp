@@ -1011,6 +1011,55 @@ def test_code_action_absent_for_multiline_native_args():
 
 
 # --------------------------------------------------------------------------- #
+# Quote-aware paren-balance in the exempt span scan (fix #3).
+# --------------------------------------------------------------------------- #
+def test_code_action_span_ignores_paren_inside_string():
+    # a `)` inside a string literal must NOT end the span early: a naive scan
+    # would stop there and yield a corrupting `@rextio.exempt b")`.
+    text = (
+        '@rextio.native(target="a)b")\n'
+        "def rejected(xs: list[int]) -> int:\n"
+        "    return helper(xs)\n"
+    )
+    (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
+    assert _apply(text, edit) == "@rextio.exempt"
+
+
+def test_code_action_span_string_is_only_a_close_paren():
+    # the string content is a bare `)`; the real arg-list close is the last `)`.
+    text = (
+        '@rextio.native(target=")")\n'
+        "def rejected(xs: list[int]) -> int:\n"
+        "    return helper(xs)\n"
+    )
+    (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
+    assert _apply(text, edit) == "@rextio.exempt"
+
+
+def test_code_action_span_ignores_open_paren_inside_single_quotes():
+    # an unbalanced `(` inside a single-quoted string must not inflate the balance
+    # (else the real close paren would be mistaken for an inner one).
+    text = (
+        "@rextio.native(target='a(b')\n"
+        "def rejected(xs: list[int]) -> int:\n"
+        "    return helper(xs)\n"
+    )
+    (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
+    assert _apply(text, edit) == "@rextio.exempt"
+
+
+def test_code_action_withheld_for_unterminated_string_in_args():
+    # an unterminated string literal on the decorator line is ambiguous: withhold
+    # the fix rather than guess a span.
+    text = (
+        '@rextio.native(target="oops)\n'
+        "def rejected(xs: list[int]) -> int:\n"
+        "    return helper(xs)\n"
+    )
+    assert _exempt_edit_apply(text) == []
+
+
+# --------------------------------------------------------------------------- #
 # Multi-line decorator tolerance in the quick-fix scan (fix #10).
 # --------------------------------------------------------------------------- #
 def test_find_native_decorator_multiline_decorator_below_native():
@@ -1266,3 +1315,57 @@ def test_changed_toml_midrun_ends_with_fresh_rerun(tmp_path, monkeypatch):
     while time.time() < deadline and server._reports.get(str(root)) is not fresh_report:
         time.sleep(0.02)
     assert server._reports.get(str(root)) is fresh_report  # not the stale one
+
+
+def test_deleted_toml_during_capabilities_warm_discards_analysis(tmp_path, monkeypatch):
+    # The post-check window (fix #2): engine.check has already returned, but a
+    # toml Deleted lands DURING the (potentially slow) capabilities warm. The
+    # final generation gate must skip both the store and the publish.
+    (tmp_path / "rextio.toml").write_text("[build]\n", encoding="utf-8")
+    root = tmp_path.resolve()
+    module = root / "ops.py"
+    module.write_text("x = 1\n", encoding="utf-8")
+    server = RextioLanguageServer()
+    _setup_workspace(server, (module.as_uri(), "x = 1\n"))
+    published = _capture_publishes(server, monkeypatch)
+    monkeypatch.setattr(server, "window_log_message", lambda _p: None)
+
+    # simulate an earlier completed run: the module URI is published + owned
+    server._published_uris[str(root)] = {module.as_uri()}
+    server._uri_owner[module.as_uri()] = str(root)
+
+    report = _one_rejection_report(root, module)
+    monkeypatch.setattr(server.engine, "check", lambda _root: report)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_capabilities(_root):
+        started.set()
+        release.wait(3.0)  # block the warm until the deletion has been processed
+        return None
+
+    monkeypatch.setattr(server.engine, "capabilities", blocking_capabilities)
+
+    worker = threading.Thread(target=server._run_analysis, args=(str(root),))
+    worker.start()
+    assert started.wait(3.0)  # analysis is now blocked inside the capabilities warm
+
+    # the toml is deleted while the warm is in flight
+    params = lsp.DidChangeWatchedFilesParams(
+        changes=[
+            lsp.FileEvent(
+                uri=(root / "rextio.toml").as_uri(), type=lsp.FileChangeType.Deleted
+            )
+        ]
+    )
+    server.handle_watched_files_change(params)
+    assert published[module.as_uri()] == []  # cleared by the deletion
+
+    release.set()  # let the stale analysis finish
+    worker.join(3.0)
+    assert not worker.is_alive()
+
+    # discarded past the warm: no report stored, no publish, diagnostics cleared
+    assert str(root) not in server._reports
+    assert published[module.as_uri()] == []

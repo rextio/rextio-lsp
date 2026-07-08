@@ -94,8 +94,8 @@ def find_rextio_binary(
 def find_project_venv_binary(project_root: Path) -> Path | None:
     """Return a ``rextio`` binary from a project virtualenv, or ``None``.
 
-    For each candidate venv root (``VIRTUAL_ENV`` first, then ``<root>/.venv``
-    and ``<root>/venv``):
+    For each candidate venv root (``<root>/.venv`` and ``<root>/venv`` first,
+    then ``VIRTUAL_ENV`` only when it lies under ``project_root``):
 
     1. probe ``<venv>/bin/rextio`` (``Scripts/rextio.exe`` on Windows) directly
        -- the binary is what we ultimately want, so prefer it over the
@@ -117,11 +117,24 @@ def find_project_venv_binary(project_root: Path) -> Path | None:
 
 
 def _candidate_venv_roots(project_root: Path) -> list[Path]:
-    roots: list[Path] = []
+    """Venv roots to probe for a project ``rextio``, most-specific first.
+
+    Root-local ``.venv``/``venv`` come first so the per-root ownership logic in
+    a multi-root workspace is not defeated by a server-ambient ``VIRTUAL_ENV``.
+    ``VIRTUAL_ENV`` is a candidate *only* when it resolves to a directory under
+    ``project_root`` (an unrelated ambient venv must not be a candidate at all),
+    and even then only after the root-local roots.
+    """
+    roots: list[Path] = [project_root / ".venv", project_root / "venv"]
     venv_env = os.environ.get("VIRTUAL_ENV")
     if venv_env:
-        roots.append(Path(venv_env))
-    roots.extend([project_root / ".venv", project_root / "venv"])
+        candidate = Path(venv_env)
+        try:
+            under_root = candidate.resolve().is_relative_to(project_root.resolve())
+        except OSError:  # pragma: no cover -- resolve() on a vanished path
+            under_root = False
+        if under_root:
+            roots.append(candidate)
     return roots
 
 

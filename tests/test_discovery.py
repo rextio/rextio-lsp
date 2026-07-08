@@ -160,3 +160,53 @@ def test_find_project_venv_binary_versioned_python_only(tmp_path, monkeypatch):
 def test_find_project_venv_binary_none_without_venv(tmp_path, monkeypatch):
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     assert find_project_venv_binary(tmp_path) is None
+
+
+# --------------------------------------------------------------------------- #
+# VIRTUAL_ENV must not shadow a root-local venv (fix #3).
+# --------------------------------------------------------------------------- #
+def test_root_local_venv_wins_over_ambient_virtualenv(tmp_path, monkeypatch):
+    # a server-ambient VIRTUAL_ENV points at an unrelated env; the root-local
+    # .venv/bin/rextio must win in a multi-root workspace.
+    ambient = tmp_path / "ambient"
+    (ambient / "bin").mkdir(parents=True)
+    ambient_rextio = ambient / "bin" / "rextio"
+    ambient_rextio.write_text("", encoding="utf-8")
+    os.chmod(ambient_rextio, 0o755)
+    monkeypatch.setenv("VIRTUAL_ENV", str(ambient))
+
+    proj = tmp_path / "proj"
+    local_bin = proj / ".venv" / "bin"
+    local_bin.mkdir(parents=True)
+    local_rextio = local_bin / "rextio"
+    local_rextio.write_text("", encoding="utf-8")
+    os.chmod(local_rextio, 0o755)
+
+    assert find_project_venv_binary(proj) == local_rextio
+
+
+def test_virtualenv_under_root_is_a_candidate(tmp_path, monkeypatch):
+    # a VIRTUAL_ENV that lies UNDER project_root is still discovered when there
+    # is no .venv/venv (resolve + is_relative_to admits it).
+    proj = tmp_path / "proj"
+    env_bin = proj / "env" / "bin"
+    env_bin.mkdir(parents=True)
+    rextio = env_bin / "rextio"
+    rextio.write_text("", encoding="utf-8")
+    os.chmod(rextio, 0o755)
+    monkeypatch.setenv("VIRTUAL_ENV", str(proj / "env"))
+    assert find_project_venv_binary(proj) == rextio
+
+
+def test_ambient_virtualenv_not_under_root_is_ignored(tmp_path, monkeypatch):
+    # an unrelated ambient VIRTUAL_ENV (not under root, no root-local venv) must
+    # not be a candidate at all.
+    ambient = tmp_path / "ambient"
+    (ambient / "bin").mkdir(parents=True)
+    r = ambient / "bin" / "rextio"
+    r.write_text("", encoding="utf-8")
+    os.chmod(r, 0o755)
+    monkeypatch.setenv("VIRTUAL_ENV", str(ambient))
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    assert find_project_venv_binary(proj) is None

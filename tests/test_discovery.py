@@ -63,3 +63,37 @@ def test_find_rextio_binary_none(tmp_path, monkeypatch):
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     monkeypatch.setattr("shutil.which", lambda _name: None)
     assert find_rextio_binary(tmp_path) is None
+
+
+def test_find_rextio_binary_prefers_interpreter_path(tmp_path, monkeypatch):
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    # a project venv rextio exists...
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python3").write_text("", encoding="utf-8")
+    venv_rextio = venv_bin / "rextio"
+    venv_rextio.write_text("", encoding="utf-8")
+    os.chmod(venv_rextio, 0o755)
+    # ...but an explicit interpreter path points elsewhere and must win
+    interp_bin = tmp_path / "custom" / "bin"
+    interp_bin.mkdir(parents=True)
+    interp_py = interp_bin / "python"
+    interp_py.write_text("", encoding="utf-8")
+    interp_rextio = interp_bin / "rextio"
+    interp_rextio.write_text("", encoding="utf-8")
+    os.chmod(interp_rextio, 0o755)
+
+    assert find_rextio_binary(tmp_path, str(interp_py)) == interp_rextio
+    # without the interpreter path, discovery falls back to the project venv
+    assert find_rextio_binary(tmp_path) == venv_rextio
+
+
+def test_find_rextio_binary_interpreter_path_missing_binary_falls_back(tmp_path, monkeypatch):
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    # interpreter path has no neighbouring rextio -> falls through to venv/PATH
+    interp_bin = tmp_path / "custom" / "bin"
+    interp_bin.mkdir(parents=True)
+    interp_py = interp_bin / "python"
+    interp_py.write_text("", encoding="utf-8")
+    assert find_rextio_binary(tmp_path, str(interp_py)) is None

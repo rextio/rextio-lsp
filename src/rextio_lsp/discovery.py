@@ -48,11 +48,16 @@ def uri_to_path(uri: str) -> Path | None:
     return Path(unquote(parsed.path))
 
 
-def find_rextio_binary(project_root: Path) -> Path | None:
+def find_rextio_binary(
+    project_root: Path, interpreter_path: str | None = None
+) -> Path | None:
     """Locate a ``rextio`` executable to use for the subprocess fallback.
 
     Preference order:
 
+    0. A ``rextio`` binary next to ``interpreter_path`` when the client supplied
+       one via ``initializationOptions.interpreter.path``. This is consulted
+       first so an editor-configured interpreter wins over auto-discovery.
     1. A ``rextio`` binary next to the project's Python interpreter, when a
        project virtualenv is discoverable (``.venv``/``venv`` under the root,
        or ``VIRTUAL_ENV``).
@@ -62,6 +67,11 @@ def find_rextio_binary(project_root: Path) -> Path | None:
     treated as the project interpreter: in production the server runs from its
     own environment, so its neighbour ``rextio`` would be the wrong one.
     """
+    if interpreter_path:
+        candidate = Path(interpreter_path).parent / _exe("rextio")
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+
     for python in _candidate_project_pythons(project_root):
         candidate = python.parent / _exe("rextio")
         if candidate.is_file() and os.access(candidate, os.X_OK):

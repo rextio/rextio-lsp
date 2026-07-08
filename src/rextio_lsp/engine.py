@@ -1,20 +1,32 @@
 """Contract acquisition: run rextio and parse its JSON into contract shapes.
 
-Two acquisition paths, tried in order:
+Two acquisition paths exist:
 
 1. **In-process** -- import the project's ``rextio`` and invoke its CLI ``main``
    with stdout captured, obtaining byte-identical JSON to the CLI. This is the
-   production-preferred path (the server ships into the project environment, so
-   ``import rextio`` resolves the project's own analyzer + plugins).
-2. **Subprocess fallback** -- run a discovered ``rextio`` binary with
-   ``--format json``. Used when ``import rextio`` fails in this interpreter.
+   production-preferred path for the common single-project case (the server
+   ships into the project environment, so ``import rextio`` resolves the
+   project's own analyzer + plugins).
+2. **Subprocess** -- run a discovered ``rextio`` binary with ``--format json``.
+
+Precedence between them (see :func:`_prefer_subprocess`):
+
+* An explicit ``initializationOptions.interpreter.path`` always wins: the
+  subprocess via that interpreter's neighbouring ``rextio`` takes precedence
+  over in-process, which is only a fallback if that binary is missing.
+* Otherwise, when the project root has a discoverable venv ``rextio`` that is
+  NOT the server's own environment (a multi-root workspace where the server is
+  not installed in every project's venv), that subprocess is preferred for that
+  root. When the server IS in the project venv (same environment), in-process is
+  used -- it is equivalent and avoids spawning a subprocess.
 
 Both call ``check`` with ``--no-report`` so the project's ``.rextio/reports``
 is never written. If neither path is available the acquisition returns ``None``
 (silent no-op; the caller logs to LSP trace).
 
-The capabilities manifest is cached keyed by its ``config_fingerprint`` so the
-plugin-importing ``capabilities`` command runs at most once per resolved config.
+The capabilities manifest is cached keyed by its composite cache key (see
+:meth:`CapabilityManifest.cache_key`) so the plugin-importing ``capabilities``
+command runs at most once per resolved config + rextio + plugin versions.
 """
 
 from __future__ import annotations
@@ -23,7 +35,9 @@ import io
 import json
 import logging
 import subprocess
+import sys
 import threading
+from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
@@ -34,7 +48,7 @@ from rextio_lsp.contract import (
     parse_capabilities,
     parse_check_report,
 )
-from rextio_lsp.discovery import find_rextio_binary
+from rextio_lsp.discovery import find_project_venv_binary, find_rextio_binary
 
 logger = logging.getLogger("rextio_lsp.engine")
 
@@ -106,6 +120,60 @@ def _run_subprocess(binary: Path, argv: list[str]) -> dict[str, Any]:
     return parsed
 
 
+def _is_server_environment(binary: Path) -> bool:
+    """Whether ``binary`` lives in the LSP server's own environment.
+
+    Compared by binary parentage: a ``rextio`` sharing a ``bin``/``Scripts``
+    directory with ``sys.executable`` is the server's own, so importing it
+    in-process is equivalent to spawning it.
+    """
+    try:
+        return binary.resolve().parent == Path(sys.executable).resolve().parent
+    except OSError:  # pragma: no cover -- resolve() on a vanished path
+        return False
+
+
+def _prefer_subprocess(
+    project_root: Path, binary: Path | None, *, interpreter_path: str | None
+) -> bool:
+    """Whether the discovered ``binary`` should take precedence over in-process.
+
+    * An explicit ``interpreter_path`` always wins (the client asked for that
+      environment's rextio).
+    * Otherwise only a *project-venv* binary in a different environment than the
+      server's own displaces in-process; a bare ``PATH`` hit or the server's own
+      neighbour does not.
+    """
+    if interpreter_path:
+        return True
+    if binary is None or _is_server_environment(binary):
+        return False
+    venv_binary = find_project_venv_binary(project_root)
+    return venv_binary is not None and venv_binary.resolve() == binary.resolve()
+
+
+def _try_in_process(command: str, argv: list[str]) -> dict[str, Any] | None:
+    if not _rextio_available_in_process():
+        return None
+    try:
+        return _run_in_process(argv)
+    except AcquisitionError as exc:
+        logger.warning("in-process rextio %s failed: %s", command, exc)
+    except Exception as exc:  # noqa: BLE001 -- never let analysis crash the server
+        logger.warning("in-process rextio %s raised %s", command, exc)
+    return None
+
+
+def _try_subprocess(command: str, binary: Path | None, argv: list[str]) -> dict[str, Any] | None:
+    if binary is None:
+        return None
+    try:
+        return _run_subprocess(binary, argv)
+    except AcquisitionError as exc:
+        logger.warning("subprocess rextio %s failed: %s", command, exc)
+    return None
+
+
 def _acquire_json(
     project_root: Path,
     command: str,
@@ -116,37 +184,41 @@ def _acquire_json(
     """Return raw JSON for ``rextio <command> <root> --format json`` or ``None``.
 
     ``None`` means neither acquisition path was available/usable -- a silent
-    no-op condition, not an error to surface to the user. ``interpreter_path``
-    (from ``initializationOptions``) is consulted first when locating the
-    subprocess-fallback binary.
+    no-op condition, not an error to surface to the user. Precedence between
+    in-process and subprocess is decided by :func:`_prefer_subprocess`; whichever
+    is not preferred is still tried as a fallback.
     """
     argv = [command, str(project_root), "--format", "json", *extra]
-
-    if _rextio_available_in_process():
-        try:
-            return _run_in_process(argv)
-        except AcquisitionError as exc:
-            logger.warning("in-process rextio %s failed, trying subprocess: %s", command, exc)
-        except Exception as exc:  # noqa: BLE001 -- never let analysis crash the server
-            logger.warning("in-process rextio %s raised %s, trying subprocess", command, exc)
-
     binary = find_rextio_binary(project_root, interpreter_path)
-    if binary is None:
-        logger.info("rextio unavailable in-process and no binary found; skipping %s", command)
-        return None
-    try:
-        return _run_subprocess(binary, argv)
-    except AcquisitionError as exc:
-        logger.warning("subprocess rextio %s failed: %s", command, exc)
-        return None
+
+    def subprocess_attempt() -> dict[str, Any] | None:
+        return _try_subprocess(command, binary, argv)
+
+    def in_process_attempt() -> dict[str, Any] | None:
+        return _try_in_process(command, argv)
+
+    order: tuple[Callable[[], dict[str, Any] | None], ...]
+    if _prefer_subprocess(project_root, binary, interpreter_path=interpreter_path):
+        order = (subprocess_attempt, in_process_attempt)
+    else:
+        order = (in_process_attempt, subprocess_attempt)
+
+    for attempt in order:
+        result = attempt()
+        if result is not None:
+            return result
+    logger.info("rextio unavailable (in-process and subprocess); skipping %s", command)
+    return None
 
 
 class Engine:
     """Stateful acquisition facade with a fingerprint-keyed manifest cache."""
 
     def __init__(self) -> None:
-        self._manifest_by_fingerprint: dict[str, CapabilityManifest] = {}
-        self._fingerprint_by_root: dict[str, str] = {}
+        # Keyed by the manifest's composite cache key (config_fingerprint +
+        # rextio_version + sorted plugin id@version); see cache_key().
+        self._manifest_by_key: dict[str, CapabilityManifest] = {}
+        self._key_by_root: dict[str, str] = {}
         self._lock = threading.Lock()
         # Set from ``initializationOptions.interpreter.path``; consulted first
         # when locating the subprocess-fallback rextio binary.
@@ -164,17 +236,20 @@ class Engine:
     def capabilities(self, project_root: Path, *, refresh: bool = False) -> CapabilityManifest | None:
         """Return the capability manifest for ``project_root``.
 
-        Cached per resolved config: the first acquisition records the
-        ``config_fingerprint`` for the root and reuses the manifest on later
-        calls. When ``rextio.toml`` changes the server calls :meth:`invalidate`
-        to drop the stale entry; pass ``refresh=True`` to force re-acquisition.
+        Cached per composite cache key (config fingerprint + rextio version +
+        plugin id/version list): the first acquisition records the key for the
+        root and reuses the manifest on later calls. When ``rextio.toml`` changes
+        the server calls :meth:`invalidate` to drop the stale entry; pass
+        ``refresh=True`` to force re-acquisition. A manifest that is not
+        cache-safe (a plugin with a null version) is never cached and is
+        re-acquired every call.
         """
         key = str(project_root)
         with self._lock:
             if not refresh:
-                fp = self._fingerprint_by_root.get(key)
-                if fp is not None:
-                    cached = self._manifest_by_fingerprint.get(fp)
+                cache_key = self._key_by_root.get(key)
+                if cache_key is not None:
+                    cached = self._manifest_by_key.get(cache_key)
                     if cached is not None:
                         return cached
 
@@ -185,20 +260,27 @@ class Engine:
             return None
         manifest = parse_capabilities(data)
 
+        cache_key = manifest.cache_key()
+        if cache_key is None:
+            # A plugin with a null version -> not cache-safe; re-acquire always.
+            with self._lock:
+                self._key_by_root.pop(key, None)
+            return manifest
+
         with self._lock:
-            self._fingerprint_by_root[key] = manifest.config_fingerprint
-            self._manifest_by_fingerprint.setdefault(manifest.config_fingerprint, manifest)
-            return self._manifest_by_fingerprint[manifest.config_fingerprint]
+            self._key_by_root[key] = cache_key
+            self._manifest_by_key.setdefault(cache_key, manifest)
+            return self._manifest_by_key[cache_key]
 
     def invalidate(self, project_root: Path) -> None:
         """Drop the cached capability manifest for ``project_root``.
 
         Called when the project's ``rextio.toml`` changes. The manifest is only
-        evicted when no other root still references its ``config_fingerprint``
-        (manifests are shared by fingerprint across roots with identical config).
+        evicted when no other root still references its composite cache key
+        (manifests are shared by key across roots with identical config).
         """
         key = str(project_root)
         with self._lock:
-            fp = self._fingerprint_by_root.pop(key, None)
-            if fp is not None and fp not in self._fingerprint_by_root.values():
-                self._manifest_by_fingerprint.pop(fp, None)
+            cache_key = self._key_by_root.pop(key, None)
+            if cache_key is not None and cache_key not in self._key_by_root.values():
+                self._manifest_by_key.pop(cache_key, None)

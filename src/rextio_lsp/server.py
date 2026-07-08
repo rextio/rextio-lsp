@@ -41,6 +41,8 @@ from rextio_lsp.contract import (
     is_contract_supported,
     lsp_character,
     lsp_line,
+    utf16_character,
+    utf16_len,
 )
 from rextio_lsp.discovery import CONFIG_FILENAME, find_project_root, uri_to_path
 from rextio_lsp.engine import Engine
@@ -60,7 +62,10 @@ ROUTE_INFO_COMMAND = "rextio.showRouteInfo"
 
 # Title of the exempt quick fix and the native decorator it rewrites.
 EXEMPT_ACTION_TITLE = "Rextio: keep on Python fallback (@rextio.exempt)"
-_NATIVE_DECORATOR_RE = re.compile(r"@rextio\.native\b")
+# Matches ``@rextio.native`` and any trailing argument list
+# (``@rextio.native(target="rust")``) so the quick fix can replace exactly that
+# token span, preserving indentation and trailing comments.
+_NATIVE_DECORATOR_RE = re.compile(r"@rextio\.native\b(?:\s*\([^)]*\))?")
 
 
 @dataclass(frozen=True)
@@ -131,23 +136,45 @@ def map_severity(code: str, *, is_rejection: bool) -> lsp.DiagnosticSeverity:
     return lsp.DiagnosticSeverity.Information
 
 
+def _character_at(lines: list[str] | None, contract_line: int, column: int) -> int:
+    """LSP character for a contract (1-based line, UTF-8 byte ``column``).
+
+    Contract columns are UTF-8 byte offsets; LSP positions default to UTF-16
+    code units. When the document's line text is available, convert the byte
+    offset accurately (see :func:`utf16_character`); otherwise fall back to the
+    raw byte offset (:func:`lsp_character`).
+    """
+    if lines is not None:
+        idx = lsp_line(contract_line)
+        if 0 <= idx < len(lines):
+            return utf16_character(lines[idx], column)
+    return lsp_character(column)
+
+
 def to_lsp_diagnostic(
-    record: DiagnosticRecord, *, is_rejection: bool, degraded: bool
+    record: DiagnosticRecord,
+    *,
+    is_rejection: bool,
+    degraded: bool,
+    lines: list[str] | None = None,
 ) -> lsp.Diagnostic:
     """Convert a contract diagnostic to an LSP diagnostic.
 
     In degraded mode (unsupported contract major) the message is the raw
     analyzer message with no guidance enrichment; otherwise the analyzer's
     single-sourced ``suggestion`` (the same string the capability manifest
-    carries) is appended.
+    carries) is appended. ``lines`` (the document's text split into lines) lets
+    the range's columns be mapped from UTF-8 byte offsets to UTF-16 code units.
     """
     start = lsp.Position(
-        line=lsp_line(record.line), character=lsp_character(record.column)
+        line=lsp_line(record.line),
+        character=_character_at(lines, record.line, record.column),
     )
     # Use the real span when the record carries one; else a zero-width range.
     if record.end_line is not None and record.end_column is not None:
         end = lsp.Position(
-            line=lsp_line(record.end_line), character=lsp_character(record.end_column)
+            line=lsp_line(record.end_line),
+            character=_character_at(lines, record.end_line, record.end_column),
         )
     else:
         end = start
@@ -164,18 +191,60 @@ def to_lsp_diagnostic(
 
 
 def diagnostics_for_file(
-    report: ProjectReport, file_path: str, *, degraded: bool
+    report: ProjectReport,
+    file_path: str,
+    *,
+    degraded: bool,
+    lines: list[str] | None = None,
 ) -> list[lsp.Diagnostic]:
-    """Build all LSP diagnostics for one file from a project report."""
+    """Build all LSP diagnostics for one file from a project report.
+
+    Includes both per-function diagnostics and any top-level/module diagnostics
+    (e.g. a syntax-error ``RXT000``) whose ``file_path`` matches -- these produce
+    zero functions, so without them the file would publish nothing. Top-level
+    records are de-duplicated against per-function diagnostics on
+    ``(code, line, column)``.
+    """
     diagnostics: list[lsp.Diagnostic] = []
+    covered: set[tuple[str, int, int]] = set()
     for fn in report.functions_in_file(file_path):
         rejection_codes = set(fn.rejection_codes)
         for record in fn.diagnostics:
             is_rejection = fn.native_status == "rejected" and record.code in rejection_codes
+            covered.add((record.code, record.line, record.column))
             diagnostics.append(
-                to_lsp_diagnostic(record, is_rejection=is_rejection, degraded=degraded)
+                to_lsp_diagnostic(
+                    record, is_rejection=is_rejection, degraded=degraded, lines=lines
+                )
             )
+    for record in report.top_level_diagnostics:
+        if record.file_path != file_path:
+            continue
+        key = (record.code, record.line, record.column)
+        if key in covered:
+            continue
+        covered.add(key)
+        # Top-level records are module/parse-level notes, never function
+        # rejections, so they map by code (Information/Hint), never Warning.
+        diagnostics.append(
+            to_lsp_diagnostic(record, is_rejection=False, degraded=degraded, lines=lines)
+        )
     return diagnostics
+
+
+def project_scope_diagnostics(
+    report: ProjectReport, *, degraded: bool
+) -> list[lsp.Diagnostic]:
+    """Top-level diagnostics with no ``file_path`` (project-scope).
+
+    Published against the project's ``rextio.toml`` URI (there is no source file
+    to attach them to). Never rejections, so mapped by code.
+    """
+    return [
+        to_lsp_diagnostic(record, is_rejection=False, degraded=degraded)
+        for record in report.top_level_diagnostics
+        if not record.file_path
+    ]
 
 
 def function_at_line(
@@ -232,7 +301,9 @@ def build_hover_markdown(
     return "\n".join(lines)
 
 
-def code_lenses_for(report: ProjectReport, file_path: str) -> list[lsp.CodeLens]:
+def code_lenses_for(
+    report: ProjectReport, file_path: str, *, lines: list[str] | None = None
+) -> list[lsp.CodeLens]:
     """One route lens per analyzed function definition line in ``file_path``.
 
     Title is ``Rextio: <route>``; the command is the informational no-op
@@ -241,7 +312,7 @@ def code_lenses_for(report: ProjectReport, file_path: str) -> list[lsp.CodeLens]
     lenses: list[lsp.CodeLens] = []
     for fn in report.functions_in_file(file_path):
         position = lsp.Position(
-            line=lsp_line(fn.line), character=lsp_character(fn.column)
+            line=lsp_line(fn.line), character=_character_at(lines, fn.line, fn.column)
         )
         lenses.append(
             lsp.CodeLens(
@@ -257,23 +328,40 @@ def code_lenses_for(report: ProjectReport, file_path: str) -> list[lsp.CodeLens]
 
 
 def find_native_decorator_line(lines: list[str], def_line: int) -> int | None:
-    """Return the 0-based index of the sole ``@rextio.native`` decorator line.
+    r"""Return the 0-based index of the sole ``@rextio.native`` decorator line.
 
-    Scans the contiguous decorator block immediately above the 1-based ``def``
-    line. Returns the index only when exactly one native decorator is present in
-    that block (otherwise ``None``, so no quick fix is offered).
+    Scans the decorator block immediately above the 1-based ``def`` line,
+    tolerating multi-line decorators (e.g. ``@foo(\n arg\n)``): a line only
+    starts a decorator when the running parenthesis balance is zero, so
+    continuation lines of another decorator's argument list are not mistaken for
+    decorator starts. ``@rextio.native`` is counted only on decorator-start
+    lines. Returns the index only when exactly one native decorator is present
+    (otherwise ``None``, so no -- or no wrong -- quick fix is offered).
     """
+    # Collect the contiguous non-blank block immediately above the def.
+    bottom = def_line - 2  # 0-based line directly above the def
+    top = bottom
+    while top >= 0 and lines[top].strip():
+        top -= 1
+    top += 1
+    if top > bottom:
+        return None  # no lines above the def (blank or start-of-file)
+
     native_indices: list[int] = []
-    idx = def_line - 2  # 0-based line directly above the def
-    while idx >= 0:
-        stripped = lines[idx].strip()
-        if not stripped:
-            break  # a blank line ends the decorator block
-        if not stripped.startswith("@"):
-            break  # a non-decorator statement ends the block
-        if _NATIVE_DECORATOR_RE.match(stripped):
-            native_indices.append(idx)
-        idx -= 1
+    balance = 0
+    for i in range(top, bottom + 1):
+        stripped = lines[i].strip()
+        if balance == 0:
+            if not stripped.startswith("@"):
+                # A non-decorator line at top level (e.g. ``class C:`` directly
+                # above the block): the decorator block, if any, begins below it.
+                native_indices = []
+            elif _NATIVE_DECORATOR_RE.match(stripped):
+                native_indices.append(i)
+        # Continuation lines (balance > 0) never start a decorator.
+        balance += stripped.count("(") - stripped.count(")")
+        if balance < 0:
+            balance = 0
     return native_indices[0] if len(native_indices) == 1 else None
 
 
@@ -316,15 +404,23 @@ def code_actions_for(
         dec_idx = find_native_decorator_line(lines, fn.line)
         if dec_idx is None:
             continue
-        seen.add(fn.qualname)
         original = lines[dec_idx]
-        indent = original[: len(original) - len(original.lstrip())]
+        match = _NATIVE_DECORATOR_RE.search(original)
+        if match is None:  # pragma: no cover -- dec_idx implies a match
+            continue
+        seen.add(fn.qualname)
+        # Replace only the matched decorator token span (``@rextio.native`` plus
+        # any ``(...)`` args) so indentation and trailing comments are preserved.
         edit = lsp.TextEdit(
             range=lsp.Range(
-                start=lsp.Position(line=dec_idx, character=0),
-                end=lsp.Position(line=dec_idx, character=len(original)),
+                start=lsp.Position(
+                    line=dec_idx, character=utf16_len(original[: match.start()])
+                ),
+                end=lsp.Position(
+                    line=dec_idx, character=utf16_len(original[: match.end()])
+                ),
             ),
-            new_text=f"{indent}@rextio.exempt",
+            new_text="@rextio.exempt",
         )
         actions.append(
             lsp.CodeAction(
@@ -352,6 +448,14 @@ class RextioLanguageServer(LanguageServer):
         self._timers: dict[str, threading.Timer] = {}
         # Last whole-project check duration (seconds), keyed by resolved root.
         self._last_duration: dict[str, float] = {}
+        # URIs the server last published diagnostics for, per resolved root, so
+        # stale diagnostics can be cleared exactly (see _set_published/_clear).
+        self._published_uris: dict[str, set[str]] = {}
+        # Roots with an analysis currently running, and roots whose debounce
+        # fired while one was running (re-armed when it finishes) -- the
+        # in-flight guard that stops duplicate concurrent analyses.
+        self._analyzing: set[str] = set()
+        self._rerun_pending: set[str] = set()
         self._state_lock = threading.Lock()
 
     # -- initialization ----------------------------------------------------- #
@@ -442,10 +546,26 @@ class RextioLanguageServer(LanguageServer):
 
     # -- analysis ----------------------------------------------------------- #
     def _run_analysis(self, root: str) -> None:
+        # In-flight guard: coalesce a debounce firing while an analysis for this
+        # root is already running -- re-arm once instead of running a duplicate
+        # concurrently (rapid saves collapse to a single trailing re-run).
+        with self._state_lock:
+            self._timers.pop(root, None)
+            if root in self._analyzing:
+                self._rerun_pending.add(root)
+                return
+            self._analyzing.add(root)
         try:
             self.analyze_project(Path(root))
         except Exception:  # noqa: BLE001 -- analysis must never crash the server
             logger.exception("analysis failed for %s", root)
+        finally:
+            with self._state_lock:
+                self._analyzing.discard(root)
+                rerun = root in self._rerun_pending
+                self._rerun_pending.discard(root)
+            if rerun:
+                self._debounce(root)
 
     def analyze_project(self, project_root: Path) -> ProjectReport | None:
         """Run a whole-project check and publish diagnostics for open docs."""
@@ -457,6 +577,10 @@ class RextioLanguageServer(LanguageServer):
         report = self.engine.check(project_root)
         self._record_check_duration(project_root, time.perf_counter() - started)
         if report is None:
+            # A previously-analyzed root that now returns nothing (rextio became
+            # unavailable): drop its cached state and clear its diagnostics so
+            # stale markers do not linger. A never-analyzed root is a silent no-op.
+            self._clear_project(project_root)
             logger.info("rextio unavailable for %s; no-op", project_root)
             return None
 
@@ -481,6 +605,7 @@ class RextioLanguageServer(LanguageServer):
     def _publish_for_project(
         self, project_root: Path, report: ProjectReport, *, degraded: bool
     ) -> None:
+        published: set[str] = set()
         for doc in list(self.workspace.text_documents.values()):
             doc_path = uri_to_path(doc.uri)
             if doc_path is None:
@@ -488,10 +613,53 @@ class RextioLanguageServer(LanguageServer):
             resolved = doc_path.resolve()
             if find_project_root(resolved) != project_root:
                 continue
-            diagnostics = diagnostics_for_file(report, str(resolved), degraded=degraded)
-            self.text_document_publish_diagnostics(
-                lsp.PublishDiagnosticsParams(uri=doc.uri, diagnostics=diagnostics)
+            lines = doc.source.splitlines()
+            diagnostics = diagnostics_for_file(
+                report, str(resolved), degraded=degraded, lines=lines
             )
+            self._publish(doc.uri, diagnostics)
+            published.add(doc.uri)
+
+        # Project-scope diagnostics (top-level, no file_path) attach to the
+        # project's rextio.toml since there is no source file to carry them.
+        scope = project_scope_diagnostics(report, degraded=degraded)
+        if scope:
+            toml_uri = (project_root / CONFIG_FILENAME).as_uri()
+            self._publish(toml_uri, scope)
+            published.add(toml_uri)
+
+        self._set_published(str(project_root), published)
+
+    # -- publish tracking / clearing --------------------------------------- #
+    def _publish(self, uri: str, diagnostics: list[lsp.Diagnostic]) -> None:
+        self.text_document_publish_diagnostics(
+            lsp.PublishDiagnosticsParams(uri=uri, diagnostics=diagnostics)
+        )
+
+    def _set_published(self, root_key: str, uris: set[str]) -> None:
+        """Record the URIs published for a root, clearing any it dropped."""
+        with self._state_lock:
+            previous = self._published_uris.get(root_key, set())
+            self._published_uris[root_key] = set(uris)
+        for uri in previous - uris:
+            self._publish(uri, [])
+
+    def _clear_project(self, project_root: Path) -> None:
+        """Drop cached state for a root and clear every URI it last published."""
+        key = str(project_root)
+        with self._state_lock:
+            self._reports.pop(key, None)
+            self._degraded.pop(key, None)
+            previous = self._published_uris.pop(key, set())
+        for uri in previous:
+            self._publish(uri, [])
+
+    def handle_did_close(self, uri: str) -> None:
+        """Clear diagnostics for a closed document and forget its publish record."""
+        with self._state_lock:
+            for uris in self._published_uris.values():
+                uris.discard(uri)
+        self._publish(uri, [])
 
     # -- hover -------------------------------------------------------------- #
     def hover_for(self, uri: str, position: lsp.Position) -> lsp.Hover | None:
@@ -506,9 +674,11 @@ class RextioLanguageServer(LanguageServer):
 
         report = self._reports.get(str(root))
         if report is None:
-            report = self.analyze_project(root)
-            if report is None:
-                return None
+            # Do not analyze synchronously in the request path (it would block
+            # the handler and duplicate the debounced background check); schedule
+            # it and return no hover for now.
+            self.schedule_analysis_for_uri(uri)
+            return None
 
         fn = function_at_line(report, str(resolved), position.line)
         if fn is None:
@@ -534,11 +704,13 @@ class RextioLanguageServer(LanguageServer):
     # -- code lens ---------------------------------------------------------- #
     def code_lens(self, params: lsp.CodeLensParams) -> list[lsp.CodeLens] | None:
         """Return route lenses for the requested document, if analyzed."""
-        result = self._report_and_path_for_uri(params.text_document.uri)
+        uri = params.text_document.uri
+        result = self._report_and_path_for_uri(uri)
         if result is None:
             return None
         report, resolved = result
-        return code_lenses_for(report, str(resolved))
+        lines = self.workspace.get_text_document(uri).source.splitlines()
+        return code_lenses_for(report, str(resolved), lines=lines)
 
     # -- code actions ------------------------------------------------------- #
     def code_action(self, params: lsp.CodeActionParams) -> list[lsp.CodeAction] | None:
@@ -570,22 +742,32 @@ class RextioLanguageServer(LanguageServer):
             return None
         report = self._reports.get(str(root.resolve()))
         if report is None:
-            report = self.analyze_project(root)
-            if report is None:
-                return None
+            # Report-miss: schedule the debounced background analysis rather than
+            # running it synchronously in this request path; no result for now.
+            self.schedule_analysis_for_uri(uri)
+            return None
         return report, resolved
 
     # -- rextio.toml watch -------------------------------------------------- #
     def handle_watched_files_change(
         self, params: lsp.DidChangeWatchedFilesParams
     ) -> None:
-        """On a ``rextio.toml`` change, drop its cache entry and re-analyze."""
+        """On a ``rextio.toml`` change, drop its cache entry and re-analyze.
+
+        A deletion instead clears the project entirely: its manifest cache is
+        dropped and its published diagnostics are cleared (the root is no longer
+        a rextio project), rather than re-debouncing an analysis that would
+        no-op.
+        """
         for change in params.changes:
             path = uri_to_path(change.uri)
             if path is None or path.name != CONFIG_FILENAME:
                 continue
             root = path.parent.resolve()
             self.engine.invalidate(root)
+            if change.type == lsp.FileChangeType.Deleted:
+                self._clear_project(root)
+                continue
             with self._state_lock:
                 self._reports.pop(str(root), None)
                 self._degraded.pop(str(root), None)
@@ -618,6 +800,10 @@ def create_server() -> RextioLanguageServer:
     def _did_save(ls: RextioLanguageServer, params: lsp.DidSaveTextDocumentParams) -> None:
         if params.text_document.uri.endswith(".py"):
             ls.schedule_analysis_for_uri(params.text_document.uri)
+
+    @server.feature(lsp.TEXT_DOCUMENT_DID_CLOSE)
+    def _did_close(ls: RextioLanguageServer, params: lsp.DidCloseTextDocumentParams) -> None:
+        ls.handle_did_close(params.text_document.uri)
 
     @server.feature(lsp.TEXT_DOCUMENT_HOVER)
     def _hover(ls: RextioLanguageServer, params: lsp.HoverParams) -> lsp.Hover | None:

@@ -1,0 +1,288 @@
+{
+  "config_fingerprint": "d7a0a2285b55b8eb2543fd8413f3312edf9be3373ae53b49a2017e7d26a11d8e",
+  "contract_version": "1.0.0",
+  "plugins": [],
+  "project_root": "/private/tmp/cap_probe2",
+  "rextio_version": "0.1.1",
+  "rules": [
+    {
+      "constraint": "Native lowering needs every parameter type resolved; an unannotated parameter cannot be typed in Rust.",
+      "diagnostic_code": "RXT001",
+      "guidance": "Annotate every parameter of a hot function end to end with supported types (int, float, bool, str, bytes, list[T], fixed tuple/dict, Optional).",
+      "id": "core/argument-annotation-required",
+      "outcome": "fallback",
+      "provider": "core",
+      "scope": {
+        "kind": "type",
+        "pattern": "function parameter without a type annotation"
+      },
+      "stability": "stable"
+    },
+    {
+      "constraint": "Auto-discovered candidates must not silently depend on the shim path; only explicit markers opt into shim semantics.",
+      "diagnostic_code": "RXT074",
+      "guidance": "Mark the function @rextio.native explicitly if the shim dependency is intended.",
+      "id": "core/auto-candidate-shim-dependency",
+      "outcome": "fallback",
+      "provider": "core",
+      "scope": {
+        "kind": "call",
+        "pattern": "auto-discovered candidate depends on a runtime-shim native"
+      },
+      "stability": "stable"
+    },
+    {
+      "constraint": "A per-iteration interpreter round-trip would erase the native speedup, so the caller stays on the fallback.",
+      "diagnostic_code": "RXT076",
+      "guidance": "Hoist the boundary call out of the loop, or mark the callee @rextio.native when it fits the subset.",
+      "id": "core/boundary-call-in-loop",
+      "outcome": "fallback",
+      "provider": "core",
+      "scope": {
+        "kind": "call",
+        "pattern": "scalar boundary call inside a native loop, comprehension body, or while-loop test"
+      },
+      "stability": "stable"
+    },
+    {
+      "constraint": "The function stays native; the note marks a known, documented deviation from CPython behavior.",
+      "diagnostic_code": "RXT090",
+      "guidance": "Review the documented divergence (docs/unsupported-features.md) and confirm it is acceptable for this function.",
+      "id": "core/documented-divergence-note",
+      "outcome": "native",
+      "provider": "core",
+      "scope": {
+        "kind": "call",
+        "pattern": "direct-native function relying on a documented, statically attributable divergence (e.g. bytes.decode error type)"
+      },
+      "stability": "experimental"
+    },
+    {
+      "constraint": "Dynamic features have no static Rust equivalent; explicitly marked functions may ride the runtime shim instead.",
+      "diagnostic_code": "RXT020",
+      "guidance": "Move the dynamic behavior out of the hot path, or keep the function on the fallback (@rextio.exempt documents the intent).",
+      "id": "core/dynamic-feature",
+      "outcome": "fallback",
+      "provider": "core",
+      "scope": {
+        "kind": "syntax",
+        "pattern": "dynamic Python feature (dynamic attributes, exec/eval, reflection)"
+      },
+      "stability": "stable"
+    },
+    {
+      "constraint": "A recognized external-accelerator decorator is the user's explicit opt-in to that tool's semantics; the function is excluded from native discovery and stays on the fallback route without a diagnostic.",
+      "diagnostic_code": null,
+      "guidance": "Keep Numba for NumPy/array kernels and @rextio.native for typed scalar code; combining both decorators on one function is rejected.",
+      "id": "core/external-accelerator-decorator",
+      "outcome": "fallback",
+      "provider": "core",
+      "scope": {
+        "kind": "decorator",
+        "pattern": "@numba.jit / @numba.njit / @numba.vectorize / @numba.guvectorize"
+      },
+      "stability": "experimental"
+    },
+    {
+      "constraint": "A plugin-typed function compiles as a PyO3 boundary entry point; a native-to-native call into it would emit Rust with the wrong arity and parameter types, so the caller is rejected in this release.",
+      "diagnostic_code": "RXT092",
+      "guidance": "Call plugin-typed functions from Python fallback code, or inline the covered operations into the caller. A REJECTED plugin-typed callee reports RXT072 (dependency rejected) instead; tooling keying on RXT092 should also handle RXT072.",
+      "id": "core/native-call-into-plugin-typed",
+      "outcome": "reject",
+      "provider": "core",
+      "scope": {
+        "kind": "call",
+        "pattern": "native candidate calls a plugin-typed function"
+      },
+      "stability": "experimental"
+    },
+    {
+      "constraint": "Native-to-fallback calls are rejected, except the explicit scalar boundary-call path (see core/scalar-boundary-call).",
+      "diagnostic_code": "RXT070",
+      "guidance": "Mark the callee @rextio.native if it fits the subset, split the caller so the native core calls only native helpers, or rely on a scalar boundary call for explicitly marked callers.",
+      "id": "core/native-calls-fallback",
+      "outcome": "reject",
+      "provider": "core",
+      "scope": {
+        "kind": "call",
+        "pattern": "native candidate calls a fallback-only project function"
+      },
+      "stability": "stable"
+    },
+    {
+      "constraint": "If a callee is rejected, its native callers cannot stay native either.",
+      "diagnostic_code": "RXT072",
+      "guidance": "Fix the callee's rejection first; acceptance propagates back up the call graph.",
+      "id": "core/native-dependency-rejected",
+      "outcome": "fallback",
+      "provider": "core",
+      "scope": {
+        "kind": "call",
+        "pattern": "native candidate depends on a rejected candidate"
+      },
+      "stability": "stable"
+    },
+    {
+      "constraint": "The explicit accelerator decorator wins (decorator > plugin > fallback); the informational note only signals that an active rule-providing plugin covers a package the module imports.",
+      "diagnostic_code": "RXT091",
+      "guidance": "Remove the accelerator decorator only if CPython-exact plugin lowering is preferred over the accelerator's semantics for this function. The hint is import-based (the function body is not analyzed), so removal may simply yield a core-native or fallback function instead.",
+      "id": "core/plugin-lowerable-accelerated",
+      "outcome": "fallback",
+      "provider": "core",
+      "scope": {
+        "kind": "decorator",
+        "pattern": "accelerator-decorated function in a module importing a plugin-covered package"
+      },
+      "stability": "experimental"
+    },
+    {
+      "constraint": "Each iteration crosses the Python/native boundary; crossings count toward the per-function demotion threshold.",
+      "diagnostic_code": "RXT073",
+      "guidance": "Move the loop into the native function so the boundary is crossed once per call instead of once per iteration.",
+      "id": "core/python-loop-calls-native",
+      "outcome": "boundary",
+      "provider": "core",
+      "scope": {
+        "kind": "call",
+        "pattern": "Python loop repeatedly calling a native function"
+      },
+      "stability": "stable"
+    },
+    {
+      "constraint": "The return type must be annotated and inside the supported subset for native lowering.",
+      "diagnostic_code": "RXT003",
+      "guidance": "Annotate the return type with a supported type; -> None is supported for procedures.",
+      "id": "core/return-annotation-required",
+      "outcome": "fallback",
+      "provider": "core",
+      "scope": {
+        "kind": "type",
+        "pattern": "missing or unsupported return type annotation"
+      },
+      "stability": "stable"
+    },
+    {
+      "constraint": "The function compiles to a PyO3 shim that calls the generated Python fallback: behavior-preserving, not a speedup.",
+      "diagnostic_code": "RXT080",
+      "guidance": "Treat the shim as a compatibility path; extract the typed hot core into its own function for a real native speedup.",
+      "id": "core/runtime-semantics-shim",
+      "outcome": "shim",
+      "provider": "core",
+      "scope": {
+        "kind": "syntax",
+        "pattern": "explicitly marked function using classes, exceptions, context managers, async, generators, or dynamic attributes"
+      },
+      "stability": "experimental"
+    },
+    {
+      "constraint": "Identifiers must be expressible in Rust (raw-identifier escaping covers most keywords, but not all names).",
+      "diagnostic_code": "RXT011",
+      "guidance": "Rename the identifier to an ASCII name that is not a non-raw-able Rust keyword.",
+      "id": "core/rust-identifier",
+      "outcome": "fallback",
+      "provider": "core",
+      "scope": {
+        "kind": "syntax",
+        "pattern": "identifier not representable in generated Rust"
+      },
+      "stability": "stable"
+    },
+    {
+      "constraint": "The call runs in-process on the interpreter: values and exceptions are CPython-exact, containers never cross, and each crossing counts toward the demotion threshold.",
+      "diagnostic_code": "RXT075",
+      "guidance": "Keep boundary-call signatures to immutable scalars (int/float/bool/str/None) and batch enough work per call to amortize the crossing.",
+      "id": "core/scalar-boundary-call",
+      "outcome": "boundary",
+      "provider": "core",
+      "scope": {
+        "kind": "call",
+        "pattern": "explicitly marked native calls a fallback-only function with an all-scalar signature"
+      },
+      "stability": "stable"
+    },
+    {
+      "constraint": "set[float] has no faithful Rust lowering: CPython's NaN-identity deduplication cannot be reproduced.",
+      "diagnostic_code": "RXT002",
+      "guidance": "Use list[float] and deduplicate explicitly, or keep the function on the Python fallback.",
+      "id": "core/set-float-item-type",
+      "outcome": "fallback",
+      "provider": "core",
+      "scope": {
+        "kind": "type",
+        "pattern": "set[float]"
+      },
+      "stability": "stable"
+    },
+    {
+      "constraint": "Only the supported type subset lowers to Rust; anything else keeps the function on the Python fallback.",
+      "diagnostic_code": "RXT002",
+      "guidance": "Use supported types on hot-path signatures, or split the function so the typed hot core stands alone.",
+      "id": "core/unsupported-argument-type",
+      "outcome": "fallback",
+      "provider": "core",
+      "scope": {
+        "kind": "type",
+        "pattern": "parameter annotated with a type outside the supported subset"
+      },
+      "stability": "stable"
+    },
+    {
+      "constraint": "A direct-native function may call only accepted native functions, supported builtins, and supported stdlib functions.",
+      "diagnostic_code": "RXT030",
+      "guidance": "Replace the call with a supported equivalent, hoist it out of the native function, or mark the callee @rextio.native when it fits the subset.",
+      "id": "core/unsupported-external-call",
+      "outcome": "fallback",
+      "provider": "core",
+      "scope": {
+        "kind": "call",
+        "pattern": "call to an unsupported builtin, stdlib, or external function"
+      },
+      "stability": "stable"
+    },
+    {
+      "constraint": "Only the documented syntax subset lowers directly (assignment, arithmetic, if/while/for, comprehensions, restricted try/except).",
+      "diagnostic_code": "RXT010",
+      "guidance": "Rewrite the hot path inside the supported subset (see docs/unsupported-features.md), or accept fallback and mark with @rextio.exempt to silence candidacy.",
+      "id": "core/unsupported-syntax",
+      "outcome": "fallback",
+      "provider": "core",
+      "scope": {
+        "kind": "syntax",
+        "pattern": "statement or expression outside the supported subset, or an invalid @rextio.native marker"
+      },
+      "stability": "stable"
+    }
+  ],
+  "target": {
+    "language": "rust"
+  },
+  "type_capabilities": {
+    "dict_key_types": [
+      "bool",
+      "int",
+      "str"
+    ],
+    "list_item_types": [
+      "bool",
+      "float",
+      "int",
+      "str"
+    ],
+    "numeric_types": [
+      "float",
+      "int"
+    ],
+    "scalar_types": [
+      "bool",
+      "bytes",
+      "float",
+      "int",
+      "str"
+    ],
+    "set_item_types": [
+      "bool",
+      "int",
+      "str"
+    ]
+  }
+}

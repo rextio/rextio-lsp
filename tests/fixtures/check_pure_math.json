@@ -1,0 +1,312 @@
+{
+  "accepted_native": [
+    "pure_math.math_ops.count_positive",
+    "pure_math.math_ops.dot_simple",
+    "pure_math.math_ops.sum_squares"
+  ],
+  "accepted_native_top_levels": [],
+  "contract_version": "1.0.0",
+  "diagnostics": [],
+  "embedding_candidates": [],
+  "modules": [
+    {
+      "diagnostics": [],
+      "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/pure_math/src/pure_math/__init__.py",
+      "functions": [],
+      "import_policies": [
+        {
+          "max_depth": 0,
+          "origin": "project",
+          "package": "pure_math",
+          "plugin": null,
+          "policy": "try-native",
+          "reason": "project-local imports are eligible for normal Rextio native analysis",
+          "target": "pure_math.math_ops.count_positive",
+          "visible_name": "count_positive"
+        },
+        {
+          "max_depth": 0,
+          "origin": "project",
+          "package": "pure_math",
+          "plugin": null,
+          "policy": "try-native",
+          "reason": "project-local imports are eligible for normal Rextio native analysis",
+          "target": "pure_math.math_ops.dot_simple",
+          "visible_name": "dot_simple"
+        },
+        {
+          "max_depth": 0,
+          "origin": "project",
+          "package": "pure_math",
+          "plugin": null,
+          "policy": "try-native",
+          "reason": "project-local imports are eligible for normal Rextio native analysis",
+          "target": "pure_math.math_ops.sum_squares",
+          "visible_name": "sum_squares"
+        }
+      ],
+      "imports": {
+        "count_positive": "pure_math.math_ops.count_positive",
+        "dot_simple": "pure_math.math_ops.dot_simple",
+        "sum_squares": "pure_math.math_ops.sum_squares"
+      },
+      "logger_names": [],
+      "module_name": "pure_math",
+      "top_level": null
+    },
+    {
+      "diagnostics": [],
+      "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/pure_math/src/pure_math/math_ops.py",
+      "functions": [
+        {
+          "accepted": true,
+          "boundary_call_targets": [],
+          "calls": [],
+          "column": 0,
+          "diagnostics": [],
+          "embedding_reason": null,
+          "explicitly_marked": true,
+          "external_accelerator": null,
+          "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/pure_math/src/pure_math/math_ops.py",
+          "inferred_arg_types": {},
+          "inferred_return_type": null,
+          "is_embedding_candidate": false,
+          "is_native_candidate": true,
+          "line": 5,
+          "module_name": "pure_math.math_ops",
+          "name": "sum_squares",
+          "native_runtime_semantics": false,
+          "native_status": "accepted",
+          "native_target_language": "rust",
+          "plugin_claims": [],
+          "qualname": "pure_math.math_ops.sum_squares",
+          "rejection_codes": [],
+          "route": "native-direct"
+        },
+        {
+          "accepted": true,
+          "boundary_call_targets": [],
+          "calls": [
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 13,
+              "in_loop": false,
+              "line": 15,
+              "target": "range"
+            },
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 19,
+              "in_loop": false,
+              "line": 15,
+              "target": "len"
+            }
+          ],
+          "column": 0,
+          "diagnostics": [],
+          "embedding_reason": null,
+          "explicitly_marked": true,
+          "external_accelerator": null,
+          "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/pure_math/src/pure_math/math_ops.py",
+          "inferred_arg_types": {},
+          "inferred_return_type": null,
+          "is_embedding_candidate": false,
+          "is_native_candidate": true,
+          "line": 13,
+          "module_name": "pure_math.math_ops",
+          "name": "dot_simple",
+          "native_runtime_semantics": false,
+          "native_status": "accepted",
+          "native_target_language": "rust",
+          "plugin_claims": [],
+          "qualname": "pure_math.math_ops.dot_simple",
+          "rejection_codes": [],
+          "route": "native-direct"
+        },
+        {
+          "accepted": true,
+          "boundary_call_targets": [],
+          "calls": [],
+          "column": 0,
+          "diagnostics": [],
+          "embedding_reason": null,
+          "explicitly_marked": true,
+          "external_accelerator": null,
+          "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/pure_math/src/pure_math/math_ops.py",
+          "inferred_arg_types": {},
+          "inferred_return_type": null,
+          "is_embedding_candidate": false,
+          "is_native_candidate": true,
+          "line": 21,
+          "module_name": "pure_math.math_ops",
+          "name": "count_positive",
+          "native_runtime_semantics": false,
+          "native_status": "accepted",
+          "native_target_language": "rust",
+          "plugin_claims": [],
+          "qualname": "pure_math.math_ops.count_positive",
+          "rejection_codes": [],
+          "route": "native-direct"
+        }
+      ],
+      "import_policies": [
+        {
+          "max_depth": 0,
+          "origin": "external",
+          "package": "rextio",
+          "plugin": null,
+          "policy": "fallback",
+          "reason": "external package without an active plugin uses the default external import policy",
+          "target": "rextio",
+          "visible_name": "rextio"
+        }
+      ],
+      "imports": {
+        "rextio": "rextio"
+      },
+      "logger_names": [],
+      "module_name": "pure_math.math_ops",
+      "top_level": null
+    },
+    {
+      "diagnostics": [],
+      "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/pure_math/src/pure_math/run_demo.py",
+      "functions": [
+        {
+          "accepted": false,
+          "boundary_call_targets": [],
+          "calls": [
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 4,
+              "in_loop": false,
+              "line": 6,
+              "target": "print"
+            },
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 25,
+              "in_loop": false,
+              "line": 6,
+              "target": "pure_math.math_ops.sum_squares"
+            },
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 4,
+              "in_loop": false,
+              "line": 7,
+              "target": "print"
+            },
+            {
+              "arg_types": [
+                null,
+                null
+              ],
+              "column": 24,
+              "in_loop": false,
+              "line": 7,
+              "target": "pure_math.math_ops.dot_simple"
+            },
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 4,
+              "in_loop": false,
+              "line": 8,
+              "target": "print"
+            },
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 28,
+              "in_loop": false,
+              "line": 8,
+              "target": "pure_math.math_ops.count_positive"
+            }
+          ],
+          "column": 0,
+          "diagnostics": [],
+          "embedding_reason": null,
+          "explicitly_marked": false,
+          "external_accelerator": null,
+          "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/pure_math/src/pure_math/run_demo.py",
+          "inferred_arg_types": {},
+          "inferred_return_type": null,
+          "is_embedding_candidate": false,
+          "is_native_candidate": false,
+          "line": 4,
+          "module_name": "pure_math.run_demo",
+          "name": "main",
+          "native_runtime_semantics": false,
+          "native_status": "not-candidate",
+          "native_target_language": null,
+          "plugin_claims": [],
+          "qualname": "pure_math.run_demo.main",
+          "rejection_codes": [],
+          "route": "fallback-python"
+        }
+      ],
+      "import_policies": [
+        {
+          "max_depth": 0,
+          "origin": "project",
+          "package": "pure_math",
+          "plugin": null,
+          "policy": "try-native",
+          "reason": "project-local imports are eligible for normal Rextio native analysis",
+          "target": "pure_math.math_ops.count_positive",
+          "visible_name": "count_positive"
+        },
+        {
+          "max_depth": 0,
+          "origin": "project",
+          "package": "pure_math",
+          "plugin": null,
+          "policy": "try-native",
+          "reason": "project-local imports are eligible for normal Rextio native analysis",
+          "target": "pure_math.math_ops.dot_simple",
+          "visible_name": "dot_simple"
+        },
+        {
+          "max_depth": 0,
+          "origin": "project",
+          "package": "pure_math",
+          "plugin": null,
+          "policy": "try-native",
+          "reason": "project-local imports are eligible for normal Rextio native analysis",
+          "target": "pure_math.math_ops.sum_squares",
+          "visible_name": "sum_squares"
+        }
+      ],
+      "imports": {
+        "count_positive": "pure_math.math_ops.count_positive",
+        "dot_simple": "pure_math.math_ops.dot_simple",
+        "sum_squares": "pure_math.math_ops.sum_squares"
+      },
+      "logger_names": [],
+      "module_name": "pure_math.run_demo",
+      "top_level": null
+    }
+  ],
+  "native_candidates": [
+    "pure_math.math_ops.count_positive",
+    "pure_math.math_ops.dot_simple",
+    "pure_math.math_ops.sum_squares"
+  ],
+  "native_top_levels": [],
+  "project_root": "/Volumes/Data/workspace/rextio/rextio/examples/pure_math",
+  "rejected_native": [],
+  "rejected_native_top_levels": []
+}

@@ -1,0 +1,416 @@
+{
+  "accepted_native": [
+    "boundary_demo.pipeline.compute_boundary",
+    "boundary_demo.pipeline.square",
+    "boundary_demo.pipeline.sum_squares"
+  ],
+  "accepted_native_top_levels": [],
+  "contract_version": "1.0.0",
+  "diagnostics": [
+    {
+      "code": "RXT075",
+      "column": 11,
+      "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+      "function_name": "boundary_demo.pipeline.compute_boundary",
+      "line": 28,
+      "message": "native function performs a scalar boundary call to the Python fallback: boundary_demo.pipeline.fallback_helper",
+      "severity": "info",
+      "suggestion": "Each call crosses the native/Python boundary at run time and counts toward the boundary-fallback threshold. Scalars cross by value: the callee observes equal values, not the caller's original objects, so identity checks (`is`) on arguments are not preserved (None/bool singletons are)."
+    },
+    {
+      "code": "RXT070",
+      "column": 11,
+      "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+      "function_name": "boundary_demo.pipeline.compute_rejected",
+      "line": 41,
+      "message": "native function calls fallback-only function: boundary_demo.pipeline.batch_helper",
+      "severity": "error",
+      "suggestion": "Mark the dependency as @rextio.native if it belongs to the supported subset, or remove the call from the native function."
+    },
+    {
+      "code": "RXT073",
+      "column": 19,
+      "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+      "function_name": "boundary_demo.pipeline.process_all",
+      "line": 47,
+      "message": "native function call inside Python loop may erase speedup: square",
+      "severity": "warning",
+      "suggestion": "Move the loop into a native batch function. Supported batch loops include for x in xs, for i, x in enumerate(xs), and for x, y in zip(xs, ys)."
+    }
+  ],
+  "embedding_candidates": [],
+  "modules": [
+    {
+      "diagnostics": [],
+      "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/__init__.py",
+      "functions": [],
+      "import_policies": [
+        {
+          "max_depth": 0,
+          "origin": "project",
+          "package": "boundary_demo",
+          "plugin": null,
+          "policy": "try-native",
+          "reason": "project-local imports are eligible for normal Rextio native analysis",
+          "target": "boundary_demo.pipeline.compute_rejected",
+          "visible_name": "compute_rejected"
+        },
+        {
+          "max_depth": 0,
+          "origin": "project",
+          "package": "boundary_demo",
+          "plugin": null,
+          "policy": "try-native",
+          "reason": "project-local imports are eligible for normal Rextio native analysis",
+          "target": "boundary_demo.pipeline.process_all",
+          "visible_name": "process_all"
+        },
+        {
+          "max_depth": 0,
+          "origin": "project",
+          "package": "boundary_demo",
+          "plugin": null,
+          "policy": "try-native",
+          "reason": "project-local imports are eligible for normal Rextio native analysis",
+          "target": "boundary_demo.pipeline.square",
+          "visible_name": "square"
+        },
+        {
+          "max_depth": 0,
+          "origin": "project",
+          "package": "boundary_demo",
+          "plugin": null,
+          "policy": "try-native",
+          "reason": "project-local imports are eligible for normal Rextio native analysis",
+          "target": "boundary_demo.pipeline.sum_squares",
+          "visible_name": "sum_squares"
+        }
+      ],
+      "imports": {
+        "compute_rejected": "boundary_demo.pipeline.compute_rejected",
+        "process_all": "boundary_demo.pipeline.process_all",
+        "square": "boundary_demo.pipeline.square",
+        "sum_squares": "boundary_demo.pipeline.sum_squares"
+      },
+      "logger_names": [],
+      "module_name": "boundary_demo",
+      "top_level": null
+    },
+    {
+      "diagnostics": [],
+      "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+      "functions": [
+        {
+          "accepted": true,
+          "boundary_call_targets": [],
+          "calls": [],
+          "column": 0,
+          "diagnostics": [],
+          "embedding_reason": null,
+          "explicitly_marked": true,
+          "external_accelerator": null,
+          "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+          "inferred_arg_types": {},
+          "inferred_return_type": null,
+          "is_embedding_candidate": false,
+          "is_native_candidate": true,
+          "line": 5,
+          "module_name": "boundary_demo.pipeline",
+          "name": "square",
+          "native_runtime_semantics": false,
+          "native_status": "accepted",
+          "native_target_language": "rust",
+          "plugin_claims": [],
+          "qualname": "boundary_demo.pipeline.square",
+          "rejection_codes": [],
+          "route": "native-direct"
+        },
+        {
+          "accepted": true,
+          "boundary_call_targets": [],
+          "calls": [
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 17,
+              "in_loop": true,
+              "line": 13,
+              "target": "square"
+            }
+          ],
+          "column": 0,
+          "diagnostics": [],
+          "embedding_reason": null,
+          "explicitly_marked": true,
+          "external_accelerator": null,
+          "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+          "inferred_arg_types": {},
+          "inferred_return_type": null,
+          "is_embedding_candidate": false,
+          "is_native_candidate": true,
+          "line": 10,
+          "module_name": "boundary_demo.pipeline",
+          "name": "sum_squares",
+          "native_runtime_semantics": false,
+          "native_status": "accepted",
+          "native_target_language": "rust",
+          "plugin_claims": [],
+          "qualname": "boundary_demo.pipeline.sum_squares",
+          "rejection_codes": [],
+          "route": "native-direct"
+        },
+        {
+          "accepted": false,
+          "boundary_call_targets": [],
+          "calls": [],
+          "column": 0,
+          "diagnostics": [],
+          "embedding_reason": null,
+          "explicitly_marked": false,
+          "external_accelerator": null,
+          "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+          "inferred_arg_types": {},
+          "inferred_return_type": null,
+          "is_embedding_candidate": false,
+          "is_native_candidate": false,
+          "line": 18,
+          "module_name": "boundary_demo.pipeline",
+          "name": "fallback_helper",
+          "native_runtime_semantics": false,
+          "native_status": "not-candidate",
+          "native_target_language": null,
+          "plugin_claims": [],
+          "qualname": "boundary_demo.pipeline.fallback_helper",
+          "rejection_codes": [],
+          "route": "fallback-python"
+        },
+        {
+          "accepted": true,
+          "boundary_call_targets": [
+            "boundary_demo.pipeline.fallback_helper"
+          ],
+          "calls": [
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 11,
+              "in_loop": false,
+              "line": 28,
+              "target": "fallback_helper"
+            }
+          ],
+          "column": 0,
+          "diagnostics": [
+            {
+              "code": "RXT075",
+              "column": 11,
+              "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+              "function_name": "boundary_demo.pipeline.compute_boundary",
+              "line": 28,
+              "message": "native function performs a scalar boundary call to the Python fallback: boundary_demo.pipeline.fallback_helper",
+              "severity": "info",
+              "suggestion": "Each call crosses the native/Python boundary at run time and counts toward the boundary-fallback threshold. Scalars cross by value: the callee observes equal values, not the caller's original objects, so identity checks (`is`) on arguments are not preserved (None/bool singletons are)."
+            }
+          ],
+          "embedding_reason": null,
+          "explicitly_marked": true,
+          "external_accelerator": null,
+          "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+          "inferred_arg_types": {},
+          "inferred_return_type": null,
+          "is_embedding_candidate": false,
+          "is_native_candidate": true,
+          "line": 23,
+          "module_name": "boundary_demo.pipeline",
+          "name": "compute_boundary",
+          "native_runtime_semantics": false,
+          "native_status": "accepted",
+          "native_target_language": "rust",
+          "plugin_claims": [],
+          "qualname": "boundary_demo.pipeline.compute_boundary",
+          "rejection_codes": [],
+          "route": "native-direct"
+        },
+        {
+          "accepted": false,
+          "boundary_call_targets": [],
+          "calls": [
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 11,
+              "in_loop": false,
+              "line": 33,
+              "target": "sum"
+            },
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 21,
+              "in_loop": false,
+              "line": 33,
+              "target": "len"
+            }
+          ],
+          "column": 0,
+          "diagnostics": [],
+          "embedding_reason": null,
+          "explicitly_marked": false,
+          "external_accelerator": null,
+          "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+          "inferred_arg_types": {},
+          "inferred_return_type": null,
+          "is_embedding_candidate": false,
+          "is_native_candidate": false,
+          "line": 32,
+          "module_name": "boundary_demo.pipeline",
+          "name": "batch_helper",
+          "native_runtime_semantics": false,
+          "native_status": "not-candidate",
+          "native_target_language": null,
+          "plugin_claims": [],
+          "qualname": "boundary_demo.pipeline.batch_helper",
+          "rejection_codes": [],
+          "route": "fallback-python"
+        },
+        {
+          "accepted": false,
+          "boundary_call_targets": [],
+          "calls": [
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 11,
+              "in_loop": false,
+              "line": 41,
+              "target": "batch_helper"
+            }
+          ],
+          "column": 0,
+          "diagnostics": [
+            {
+              "code": "RXT070",
+              "column": 11,
+              "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+              "function_name": "boundary_demo.pipeline.compute_rejected",
+              "line": 41,
+              "message": "native function calls fallback-only function: boundary_demo.pipeline.batch_helper",
+              "severity": "error",
+              "suggestion": "Mark the dependency as @rextio.native if it belongs to the supported subset, or remove the call from the native function."
+            }
+          ],
+          "embedding_reason": null,
+          "explicitly_marked": true,
+          "external_accelerator": null,
+          "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+          "inferred_arg_types": {},
+          "inferred_return_type": null,
+          "is_embedding_candidate": false,
+          "is_native_candidate": true,
+          "line": 37,
+          "module_name": "boundary_demo.pipeline",
+          "name": "compute_rejected",
+          "native_runtime_semantics": false,
+          "native_status": "rejected",
+          "native_target_language": "rust",
+          "plugin_claims": [],
+          "qualname": "boundary_demo.pipeline.compute_rejected",
+          "rejection_codes": [
+            "RXT070"
+          ],
+          "route": "fallback-python"
+        },
+        {
+          "accepted": false,
+          "boundary_call_targets": [],
+          "calls": [
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 8,
+              "in_loop": true,
+              "line": 47,
+              "target": "out.append"
+            },
+            {
+              "arg_types": [
+                null
+              ],
+              "column": 19,
+              "in_loop": true,
+              "line": 47,
+              "target": "square"
+            }
+          ],
+          "column": 0,
+          "diagnostics": [
+            {
+              "code": "RXT073",
+              "column": 19,
+              "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+              "function_name": "boundary_demo.pipeline.process_all",
+              "line": 47,
+              "message": "native function call inside Python loop may erase speedup: square",
+              "severity": "warning",
+              "suggestion": "Move the loop into a native batch function. Supported batch loops include for x in xs, for i, x in enumerate(xs), and for x, y in zip(xs, ys)."
+            }
+          ],
+          "embedding_reason": null,
+          "explicitly_marked": false,
+          "external_accelerator": null,
+          "file_path": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py",
+          "inferred_arg_types": {},
+          "inferred_return_type": null,
+          "is_embedding_candidate": false,
+          "is_native_candidate": false,
+          "line": 44,
+          "module_name": "boundary_demo.pipeline",
+          "name": "process_all",
+          "native_runtime_semantics": false,
+          "native_status": "not-candidate",
+          "native_target_language": null,
+          "plugin_claims": [],
+          "qualname": "boundary_demo.pipeline.process_all",
+          "rejection_codes": [],
+          "route": "fallback-python"
+        }
+      ],
+      "import_policies": [
+        {
+          "max_depth": 0,
+          "origin": "external",
+          "package": "rextio",
+          "plugin": null,
+          "policy": "fallback",
+          "reason": "external package without an active plugin uses the default external import policy",
+          "target": "rextio",
+          "visible_name": "rextio"
+        }
+      ],
+      "imports": {
+        "rextio": "rextio"
+      },
+      "logger_names": [],
+      "module_name": "boundary_demo.pipeline",
+      "top_level": null
+    }
+  ],
+  "native_candidates": [
+    "boundary_demo.pipeline.compute_boundary",
+    "boundary_demo.pipeline.compute_rejected",
+    "boundary_demo.pipeline.square",
+    "boundary_demo.pipeline.sum_squares"
+  ],
+  "native_top_levels": [],
+  "project_root": "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo",
+  "rejected_native": [
+    "boundary_demo.pipeline.compute_rejected"
+  ],
+  "rejected_native_top_levels": []
+}

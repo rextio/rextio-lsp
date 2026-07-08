@@ -106,11 +106,19 @@ def _run_subprocess(binary: Path, argv: list[str]) -> dict[str, Any]:
     return parsed
 
 
-def _acquire_json(project_root: Path, command: str, extra: list[str]) -> dict[str, Any] | None:
+def _acquire_json(
+    project_root: Path,
+    command: str,
+    extra: list[str],
+    *,
+    interpreter_path: str | None = None,
+) -> dict[str, Any] | None:
     """Return raw JSON for ``rextio <command> <root> --format json`` or ``None``.
 
     ``None`` means neither acquisition path was available/usable -- a silent
-    no-op condition, not an error to surface to the user.
+    no-op condition, not an error to surface to the user. ``interpreter_path``
+    (from ``initializationOptions``) is consulted first when locating the
+    subprocess-fallback binary.
     """
     argv = [command, str(project_root), "--format", "json", *extra]
 
@@ -122,7 +130,7 @@ def _acquire_json(project_root: Path, command: str, extra: list[str]) -> dict[st
         except Exception as exc:  # noqa: BLE001 -- never let analysis crash the server
             logger.warning("in-process rextio %s raised %s, trying subprocess", command, exc)
 
-    binary = find_rextio_binary(project_root)
+    binary = find_rextio_binary(project_root, interpreter_path)
     if binary is None:
         logger.info("rextio unavailable in-process and no binary found; skipping %s", command)
         return None
@@ -140,10 +148,15 @@ class Engine:
         self._manifest_by_fingerprint: dict[str, CapabilityManifest] = {}
         self._fingerprint_by_root: dict[str, str] = {}
         self._lock = threading.Lock()
+        # Set from ``initializationOptions.interpreter.path``; consulted first
+        # when locating the subprocess-fallback rextio binary.
+        self.interpreter_path: str | None = None
 
     def check(self, project_root: Path) -> ProjectReport | None:
         """Run a whole-project ``check`` and parse it, or ``None`` on no-op."""
-        data = _acquire_json(project_root, "check", ["--no-report"])
+        data = _acquire_json(
+            project_root, "check", ["--no-report"], interpreter_path=self.interpreter_path
+        )
         if data is None:
             return None
         return parse_check_report(data)
@@ -153,8 +166,8 @@ class Engine:
 
         Cached per resolved config: the first acquisition records the
         ``config_fingerprint`` for the root and reuses the manifest on later
-        calls. Config-change invalidation (watching ``rextio.toml``) is deferred
-        to M2; pass ``refresh=True`` to force re-acquisition.
+        calls. When ``rextio.toml`` changes the server calls :meth:`invalidate`
+        to drop the stale entry; pass ``refresh=True`` to force re-acquisition.
         """
         key = str(project_root)
         with self._lock:
@@ -165,7 +178,9 @@ class Engine:
                     if cached is not None:
                         return cached
 
-        data = _acquire_json(project_root, "capabilities", [])
+        data = _acquire_json(
+            project_root, "capabilities", [], interpreter_path=self.interpreter_path
+        )
         if data is None:
             return None
         manifest = parse_capabilities(data)
@@ -174,3 +189,16 @@ class Engine:
             self._fingerprint_by_root[key] = manifest.config_fingerprint
             self._manifest_by_fingerprint.setdefault(manifest.config_fingerprint, manifest)
             return self._manifest_by_fingerprint[manifest.config_fingerprint]
+
+    def invalidate(self, project_root: Path) -> None:
+        """Drop the cached capability manifest for ``project_root``.
+
+        Called when the project's ``rextio.toml`` changes. The manifest is only
+        evicted when no other root still references its ``config_fingerprint``
+        (manifests are shared by fingerprint across roots with identical config).
+        """
+        key = str(project_root)
+        with self._lock:
+            fp = self._fingerprint_by_root.pop(key, None)
+            if fp is not None and fp not in self._fingerprint_by_root.values():
+                self._manifest_by_fingerprint.pop(fp, None)

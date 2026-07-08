@@ -20,10 +20,12 @@ pygls-free so they can be unit tested without a running server.
 
 from __future__ import annotations
 
+import io
 import logging
 import re
 import threading
 import time
+import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -62,8 +64,9 @@ ROUTE_INFO_COMMAND = "rextio.showRouteInfo"
 
 # Title of the exempt quick fix and the native decorator it rewrites.
 EXEMPT_ACTION_TITLE = "Rextio: keep on Python fallback (@rextio.exempt)"
-# Matches the ``@rextio.native`` decorator token itself (name only). The quick
-# fix computes the argument-list span separately via a paren-balance scan (see
+# Matches the ``@rextio.native`` decorator token itself (name only), used only
+# to spot a native decorator start line. The quick fix computes the
+# argument-list span separately over Python ``tokenize`` output (see
 # :func:`_native_exempt_span`), never a regex: a regex ``[^)]*`` group stops at
 # the first ``)`` and would corrupt nested (``target="rust(builtin)"``) or
 # multi-line argument lists.
@@ -355,6 +358,60 @@ def code_lenses_for(
     return lenses
 
 
+def _line_tokens(line: str) -> list[tokenize.TokenInfo] | None:
+    """Tokenize a single physical ``line``, or ``None`` if it is unanalyzable.
+
+    Built on :func:`tokenize.generate_tokens`, which classifies every Python
+    string form -- single/double quotes, single-line triple quotes, escapes and
+    string adjacency -- and comments exactly, so a ``(`` or ``)`` inside a string
+    or comment is a ``STRING``/``COMMENT`` token, never an ``OP`` paren. Adopting
+    tokenize retired the string-shape whack-a-mole of council rounds 17-19
+    (nested parens, single quotes, single-line triple quotes): the tokenizer
+    settles every string form for us instead of a hand-rolled quote scanner.
+
+    Any tokenizer failure -- ``TokenError`` from an unterminated string or an
+    unclosed bracket (a multi-line construct), ``IndentationError``, or anything
+    else -- means the line cannot be understood; return ``None`` so callers
+    WITHHOLD their action rather than guess a span and corrupt code.
+
+    tokenize reports token columns as 0-based code-point offsets into ``line`` --
+    the very indices ``line[:col]`` uses elsewhere in this module -- so token
+    columns need no conversion (verified against non-ASCII string content).
+    """
+    try:
+        return list(tokenize.generate_tokens(io.StringIO(line).readline))
+    except Exception:  # any tokenizer failure => unanalyzable => withhold
+        return None
+
+
+def _line_paren_delta(line: str) -> int:
+    """Net ``OP`` paren depth change on ``line`` (open minus close).
+
+    Counts only ``OP`` ``(``/``)`` TOKENS, so parens inside string literals or
+    comments never skew the contiguous-decorator-block balance -- the F2 edge of
+    round 19, where a sibling ``@foo("(")`` (or ``@foo  # (``) above
+    ``@rextio.native`` inflated a char-count balance and suppressed the fix.
+
+    A line that is only a FRAGMENT of a multi-line construct (e.g. ``@foo(`` on
+    its own) makes tokenize raise once it runs off the end of the line; the
+    tokens produced before that point still carry the real open/close parens, so
+    they are counted -- matching the old char scan on such fragments while still
+    ignoring string/comment parens.
+    """
+    delta = 0
+    gen = tokenize.generate_tokens(io.StringIO(line).readline)
+    try:
+        for tok in gen:
+            if tok.type == tokenize.OP:
+                if tok.string == "(":
+                    delta += 1
+                elif tok.string == ")":
+                    delta -= 1
+    except Exception:  # keep the parens counted before the tokenizer gave up
+        pass
+    return delta
+
+
 def find_native_decorator_line(lines: list[str], def_line: int) -> int | None:
     r"""Return the 0-based index of the sole ``@rextio.native`` decorator line.
 
@@ -386,8 +443,11 @@ def find_native_decorator_line(lines: list[str], def_line: int) -> int | None:
                 native_indices = []
             elif _NATIVE_DECORATOR_RE.match(stripped):
                 native_indices.append(i)
-        # Continuation lines (balance > 0) never start a decorator.
-        balance += stripped.count("(") - stripped.count(")")
+        # Continuation lines (balance > 0) never start a decorator. Balance is
+        # tracked over OP paren TOKENS (see :func:`_line_paren_delta`), not raw
+        # characters, so a string/comment paren in a sibling decorator such as
+        # ``@foo("(")`` no longer skews the block scan (round 19 F2).
+        balance += _line_paren_delta(lines[i])
         if balance < 0:
             balance = 0
     return native_indices[0] if len(native_indices) == 1 else None
@@ -396,54 +456,59 @@ def find_native_decorator_line(lines: list[str], def_line: int) -> int | None:
 def _native_exempt_span(line: str) -> tuple[int, int] | None:
     """Char span of ``@rextio.native`` + its single-line arg list on ``line``.
 
-    Returns the ``(start, end)`` slice to replace with ``@rextio.exempt``:
+    Returns the ``(start, end)`` code-point slice to replace with
+    ``@rextio.exempt``, computed over :func:`tokenize` output:
 
+    * locate the ``@rextio.native`` token sequence -- ``OP '@'``, ``NAME
+      'rextio'``, ``OP '.'``, ``NAME 'native'``;
     * a bare decorator (no argument list, e.g. ``@rextio.native  # note``) spans
       only the token, leaving any trailing comment untouched;
-    * an argument list is bounded by a quote-aware paren-balance scan from the
-      opening ``(``: parens inside string literals do not affect balance, so
-      ``target="a)b"`` and ``target="rust(builtin)"`` span the real close, not a
-      regex (or naive scan) that would stop at the first in-string ``)``;
-    * an argument list that does NOT close on this line (multi-line), or a line
-      with an unterminated string literal, returns ``None`` -- the quick fix is
-      withheld rather than emit a corrupting edit. Decorator args here are
-      single-line by construction (multi-line is already withheld above), so no
-      triple-quote handling is needed.
+    * when an ``OP '('`` follows, the span ends at the token-level matching
+      ``OP ')'`` (paren depth over ``OP`` tokens only). Because parens inside a
+      string or comment are ``STRING``/``COMMENT`` tokens, no string form can
+      confuse the depth: ``target="a)b"``, ``target="rust(builtin)"`` and even a
+      single-line triple-quoted ``target='''a')b'''`` span the real close. This
+      settled the rounds 17-19 string-edge class.
+    * an argument list that does NOT close on this line (multi-line), or any line
+      tokenize rejects (e.g. an unterminated string), returns ``None`` -- the
+      quick fix is withheld rather than emit a corrupting edit.
+
+    Token columns are 0-based code-point offsets into ``line`` (the same indices
+    ``line[:start]`` uses), so they are used directly with no conversion.
     """
-    match = _NATIVE_DECORATOR_RE.search(line)
-    if match is None:
+    tokens = _line_tokens(line)
+    if tokens is None:
         return None
-    start, after_token = match.start(), match.end()
-    j = after_token
-    while j < len(line) and line[j] in " \t":
-        j += 1
-    if j >= len(line) or line[j] != "(":
-        return start, after_token  # bare decorator: replace only the token
-    balance = 0
-    quote: str | None = None
-    escaped = False
-    for k in range(j, len(line)):
-        ch = line[k]
-        if quote is not None:
-            # Inside a string literal: parens do not affect balance; only the
-            # matching unescaped quote closes it (honor backslash escapes).
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == quote:
-                quote = None
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-        elif ch == "(":
-            balance += 1
-        elif ch == ")":
-            balance -= 1
-            if balance == 0:
-                return start, k + 1
-    # Unclosed paren (multi-line arg list) or an unterminated string on the line:
-    # ambiguous, so withhold the fix rather than guess a span.
+    op, name = tokenize.OP, tokenize.NAME
+    for i in range(len(tokens) - 3):
+        if (
+            tokens[i].type == op
+            and tokens[i].string == "@"
+            and tokens[i + 1].type == name
+            and tokens[i + 1].string == "rextio"
+            and tokens[i + 2].type == op
+            and tokens[i + 2].string == "."
+            and tokens[i + 3].type == name
+            and tokens[i + 3].string == "native"
+        ):
+            start = tokens[i].start[1]
+            native_end = tokens[i + 3].end[1]
+            nxt = tokens[i + 4] if i + 4 < len(tokens) else None
+            if nxt is None or nxt.type != op or nxt.string != "(":
+                return start, native_end  # bare decorator: replace only the token
+            depth = 0
+            for tok in tokens[i + 4 :]:
+                if tok.type != op:
+                    continue
+                if tok.string == "(":
+                    depth += 1
+                elif tok.string == ")":
+                    depth -= 1
+                    if depth == 0:
+                        return start, tok.end[1]
+            # A balanced line always closes the opener (an unclosed bracket is a
+            # TokenError already turned into None above); withhold defensively.
+            return None
     return None
 
 

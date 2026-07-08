@@ -1,0 +1,232 @@
+"""Rextio tooling-contract shapes, parsing, and contract-version gating.
+
+This module is the LSP server's data model. It intentionally re-derives small
+frozen dataclasses from the contract JSON rather than importing any rextio
+internal type, so the server stays decoupled from analyzer internals and only
+depends on the documented contract surface (see
+``rextio/docs/specs/tooling-contract.md``).
+
+Two JSON surfaces are parsed:
+
+* ``rextio check --format json`` -> :class:`ProjectReport` (per-function routes
+  and diagnostics).
+* ``rextio capabilities --format json`` -> :class:`CapabilityManifest` (rule
+  records used for guidance lookup).
+
+Positions in the contract follow Python's ``ast`` conventions: ``line`` is
+1-based, ``column`` is a 0-based ``col_offset``. LSP positions are fully 0-based,
+so line is decremented and column passed through (see :func:`lsp_line`).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+# The contract major version this server understands. A check/capabilities
+# payload whose top-level ``contract_version`` has a different major triggers
+# degraded (generic) diagnostics -- see :func:`is_contract_supported`.
+SUPPORTED_CONTRACT_MAJOR = 1
+
+# Codes that are informational notes/hints rather than promotion blockers. They
+# map to a low LSP severity regardless of the rextio-side severity string. Kept
+# here (not in the server) so it is unit-testable without pygls.
+INFORMATIONAL_CODES = frozenset({"RXT075", "RXT080", "RXT090", "RXT091"})
+
+
+def lsp_line(contract_line: int) -> int:
+    """Convert a 1-based contract line to a 0-based LSP line (never negative)."""
+    return max(contract_line - 1, 0)
+
+
+def lsp_character(contract_column: int) -> int:
+    """Convert a contract column to a 0-based LSP character.
+
+    Contract columns are already 0-based ``ast.col_offset`` values, so this is
+    an identity clamp; it exists to document the (asymmetric) position
+    convention and to guard against malformed negative offsets.
+    """
+    return max(contract_column, 0)
+
+
+@dataclass(frozen=True)
+class DiagnosticRecord:
+    """One analyzer diagnostic from a check report.
+
+    ``severity`` is the raw rextio severity string (``info``/``warning``/
+    ``error``); the LSP severity is derived separately (the contract mandates
+    the server never surfaces Error), so it is preserved verbatim here.
+    """
+
+    code: str
+    message: str
+    severity: str
+    file_path: str
+    line: int
+    column: int
+    function_name: str | None = None
+    suggestion: str | None = None
+
+
+@dataclass(frozen=True)
+class FunctionReport:
+    """A single analyzed function: where it runs and why."""
+
+    qualname: str
+    name: str
+    file_path: str
+    line: int
+    column: int
+    route: str
+    native_status: str
+    rejection_codes: tuple[str, ...] = ()
+    diagnostics: tuple[DiagnosticRecord, ...] = ()
+
+
+@dataclass(frozen=True)
+class ProjectReport:
+    """Parsed ``check --format json`` payload, flattened to functions."""
+
+    contract_version: str
+    project_root: str
+    functions: tuple[FunctionReport, ...] = ()
+    top_level_diagnostics: tuple[DiagnosticRecord, ...] = ()
+
+    def functions_in_file(self, file_path: str) -> list[FunctionReport]:
+        """Return functions whose ``file_path`` matches (order preserved)."""
+        return [fn for fn in self.functions if fn.file_path == file_path]
+
+
+@dataclass(frozen=True)
+class RuleRecord:
+    """A capability-manifest rule record (L2 fields)."""
+
+    id: str
+    provider: str
+    diagnostic_code: str | None
+    constraint: str
+    guidance: str
+    outcome: str
+    stability: str
+
+
+@dataclass(frozen=True)
+class CapabilityManifest:
+    """Parsed ``capabilities --format json`` payload used for guidance lookup."""
+
+    contract_version: str
+    config_fingerprint: str
+    rextio_version: str
+    project_root: str
+    rules: tuple[RuleRecord, ...] = ()
+    plugins: tuple[dict[str, Any], ...] = ()
+    _by_code: dict[str, RuleRecord] = field(default_factory=dict, compare=False, repr=False)
+
+    def guidance_for(self, code: str) -> RuleRecord | None:
+        """Look up the rule record whose ``diagnostic_code`` equals ``code``."""
+        if not self._by_code:
+            for rule in self.rules:
+                if rule.diagnostic_code and rule.diagnostic_code not in self._by_code:
+                    self._by_code[rule.diagnostic_code] = rule
+        return self._by_code.get(code)
+
+
+def parse_major(version: str | None) -> int | None:
+    """Return the SemVer major of ``version``, or ``None`` if unparseable."""
+    if not version:
+        return None
+    head = version.split(".", 1)[0].strip()
+    try:
+        return int(head)
+    except ValueError:
+        return None
+
+
+def is_contract_supported(version: str | None) -> bool:
+    """Return whether ``version``'s major equals the supported contract major."""
+    return parse_major(version) == SUPPORTED_CONTRACT_MAJOR
+
+
+def _parse_diagnostic(raw: dict[str, Any]) -> DiagnosticRecord:
+    return DiagnosticRecord(
+        code=str(raw.get("code", "")),
+        message=str(raw.get("message", "")),
+        severity=str(raw.get("severity", "")),
+        file_path=str(raw.get("file_path", "")),
+        line=int(raw.get("line", 1)),
+        column=int(raw.get("column", 0)),
+        function_name=raw.get("function_name"),
+        suggestion=raw.get("suggestion"),
+    )
+
+
+def _parse_function(raw: dict[str, Any]) -> FunctionReport:
+    return FunctionReport(
+        qualname=str(raw.get("qualname", raw.get("name", ""))),
+        name=str(raw.get("name", "")),
+        file_path=str(raw.get("file_path", "")),
+        line=int(raw.get("line", 1)),
+        column=int(raw.get("column", 0)),
+        route=str(raw.get("route", "")),
+        native_status=str(raw.get("native_status", "")),
+        rejection_codes=tuple(str(c) for c in raw.get("rejection_codes", ()) or ()),
+        diagnostics=tuple(
+            _parse_diagnostic(d) for d in raw.get("diagnostics", ()) or () if isinstance(d, dict)
+        ),
+    )
+
+
+def parse_check_report(data: dict[str, Any]) -> ProjectReport:
+    """Parse a ``check --format json`` payload into a :class:`ProjectReport`.
+
+    Unknown top-level and per-record fields are ignored (forward compatibility,
+    per the contract's "tolerate unknown fields" rule).
+    """
+    functions: list[FunctionReport] = []
+    for module in data.get("modules", ()) or ():
+        if not isinstance(module, dict):
+            continue
+        for fn in module.get("functions", ()) or ():
+            if isinstance(fn, dict):
+                functions.append(_parse_function(fn))
+    top = tuple(
+        _parse_diagnostic(d)
+        for d in data.get("diagnostics", ()) or ()
+        if isinstance(d, dict)
+    )
+    return ProjectReport(
+        contract_version=str(data.get("contract_version", "")),
+        project_root=str(data.get("project_root", "")),
+        functions=tuple(functions),
+        top_level_diagnostics=top,
+    )
+
+
+def _parse_rule(raw: dict[str, Any]) -> RuleRecord:
+    return RuleRecord(
+        id=str(raw.get("id", "")),
+        provider=str(raw.get("provider", "")),
+        diagnostic_code=raw.get("diagnostic_code"),
+        constraint=str(raw.get("constraint", "")),
+        guidance=str(raw.get("guidance", "")),
+        outcome=str(raw.get("outcome", "")),
+        stability=str(raw.get("stability", "")),
+    )
+
+
+def parse_capabilities(data: dict[str, Any]) -> CapabilityManifest:
+    """Parse a ``capabilities --format json`` payload into a manifest."""
+    rules = tuple(
+        _parse_rule(r) for r in data.get("rules", ()) or () if isinstance(r, dict)
+    )
+    plugins = tuple(
+        p for p in data.get("plugins", ()) or () if isinstance(p, dict)
+    )
+    return CapabilityManifest(
+        contract_version=str(data.get("contract_version", "")),
+        config_fingerprint=str(data.get("config_fingerprint", "")),
+        rextio_version=str(data.get("rextio_version", "")),
+        project_root=str(data.get("project_root", "")),
+        rules=rules,
+        plugins=plugins,
+    )

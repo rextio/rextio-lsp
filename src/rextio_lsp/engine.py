@@ -48,7 +48,7 @@ from rextio_lsp.contract import (
     parse_capabilities,
     parse_check_report,
 )
-from rextio_lsp.discovery import find_project_venv_binary, find_rextio_binary
+from rextio_lsp.discovery import _exe, find_project_venv_binary, find_rextio_binary
 
 logger = logging.getLogger("rextio_lsp.engine")
 
@@ -123,12 +123,21 @@ def _run_subprocess(binary: Path, argv: list[str]) -> dict[str, Any]:
 def _is_server_environment(binary: Path) -> bool:
     """Whether ``binary`` lives in the LSP server's own environment.
 
-    Compared by binary parentage: a ``rextio`` sharing a ``bin``/``Scripts``
-    directory with ``sys.executable`` is the server's own, so importing it
-    in-process is equivalent to spawning it.
+    Compared against the server's environment via ``sys.prefix``, NOT by
+    resolving ``sys.executable``: in the production layout ``.venv/bin/python``
+    is a symlink whose ``resolve()`` escapes to the pyenv base, while
+    ``.venv/bin/rextio`` resolves in place -- so resolving the interpreter would
+    misclassify the server's OWN venv as a foreign environment and never take
+    the in-process fast path. The primary check compares the binary's UNRESOLVED
+    parent to ``<sys.prefix>/bin`` (``Scripts`` on Windows); a resolved-parent
+    comparison is a secondary fallback for indirect layouts.
     """
+    bindir = "Scripts" if sys.platform == "win32" else "bin"
+    server_bindir = Path(sys.prefix) / bindir
+    if binary.parent == server_bindir:
+        return True
     try:
-        return binary.resolve().parent == Path(sys.executable).resolve().parent
+        return binary.resolve().parent == server_bindir.resolve()
     except OSError:  # pragma: no cover -- resolve() on a vanished path
         return False
 
@@ -138,15 +147,27 @@ def _prefer_subprocess(
 ) -> bool:
     """Whether the discovered ``binary`` should take precedence over in-process.
 
-    * An explicit ``interpreter_path`` always wins (the client asked for that
-      environment's rextio).
+    * An explicit ``interpreter_path`` wins, but ONLY when the discovered binary
+      is that interpreter's own neighbour (``<interpreter dir>/rextio``): the
+      client asked for that specific environment's rextio, so a bare ``PATH``
+      fallback discovered *under* an explicit interpreter_path must not displace
+      in-process.
     * Otherwise only a *project-venv* binary in a different environment than the
       server's own displaces in-process; a bare ``PATH`` hit or the server's own
       neighbour does not.
+
+    ``binary is None`` returns False either way -- there is nothing to prefer;
+    in-process runs first and the (absent) subprocess is a no-op fallback.
     """
+    if binary is None:
+        return False
     if interpreter_path:
-        return True
-    if binary is None or _is_server_environment(binary):
+        neighbour = Path(interpreter_path).parent / _exe("rextio")
+        try:
+            return neighbour.resolve() == binary.resolve()
+        except OSError:  # pragma: no cover -- resolve() on a vanished path
+            return False
+    if _is_server_environment(binary):
         return False
     venv_binary = find_project_venv_binary(project_root)
     return venv_binary is not None and venv_binary.resolve() == binary.resolve()
@@ -171,6 +192,11 @@ def _try_subprocess(command: str, binary: Path | None, argv: list[str]) -> dict[
         return _run_subprocess(binary, argv)
     except AcquisitionError as exc:
         logger.warning("subprocess rextio %s failed: %s", command, exc)
+    except Exception as exc:  # noqa: BLE001 -- never let analysis crash the server
+        # Mirrors _try_in_process: the specific OSError/SubprocessError cases are
+        # wrapped inside _run_subprocess; this catches any unforeseen escape so
+        # the other acquisition path still gets tried.
+        logger.warning("subprocess rextio %s raised %s", command, exc)
     return None
 
 

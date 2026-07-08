@@ -33,17 +33,35 @@ def _record_paths(monkeypatch, *, in_process_ok=True):
 # Acquisition precedence (interpreter path / per-root venv).
 # --------------------------------------------------------------------------- #
 def test_interpreter_path_prefers_subprocess_over_in_process(tmp_path, monkeypatch):
-    fake = tmp_path / "rextio"
+    # the discovered binary IS the interpreter's own neighbour -> subprocess wins
+    interp = tmp_path / "bin" / "python"
+    fake = tmp_path / "bin" / "rextio"
     calls = _record_paths(monkeypatch, in_process_ok=True)
     monkeypatch.setattr(engine, "find_rextio_binary", lambda root, ip=None: fake)
 
     eng = engine.Engine()
-    eng.interpreter_path = "/opt/py/bin/python"  # explicit interpreter -> wins
+    eng.interpreter_path = str(interp)  # explicit interpreter -> its rextio wins
     report = eng.check(tmp_path)
 
     assert report is not None
     # subprocess used even though in-process import is available
     assert calls == ["subprocess"]
+
+
+def test_interpreter_path_path_fallback_binary_keeps_in_process(tmp_path, monkeypatch):
+    # interpreter_path is set, but the discovered binary is a bare PATH fallback
+    # NOT next to that interpreter -> it must NOT displace in-process (fix #10).
+    interp = tmp_path / "env" / "bin" / "python"
+    path_hit = tmp_path / "usr" / "bin" / "rextio"  # different dir than interp
+    calls = _record_paths(monkeypatch, in_process_ok=True)
+    monkeypatch.setattr(engine, "find_rextio_binary", lambda root, ip=None: path_hit)
+
+    eng = engine.Engine()
+    eng.interpreter_path = str(interp)
+    report = eng.check(tmp_path)
+
+    assert report is not None
+    assert calls == ["in_process"]  # PATH fallback did not preempt in-process
 
 
 def test_project_venv_binary_differs_prefers_subprocess(tmp_path, monkeypatch):
@@ -75,7 +93,8 @@ def test_server_environment_binary_prefers_in_process(tmp_path, monkeypatch):
 
 
 def test_preferred_subprocess_falls_back_to_in_process_on_failure(tmp_path, monkeypatch):
-    fake = tmp_path / "rextio"
+    interp = tmp_path / "bin" / "python"
+    fake = tmp_path / "bin" / "rextio"  # the interpreter's neighbour
     calls: list[str] = []
 
     def raising_subprocess(binary, argv):
@@ -92,12 +111,61 @@ def test_preferred_subprocess_falls_back_to_in_process_on_failure(tmp_path, monk
     monkeypatch.setattr(engine, "find_rextio_binary", lambda root, ip=None: fake)
 
     eng = engine.Engine()
-    eng.interpreter_path = "/opt/py/bin/python"  # prefer subprocess...
+    eng.interpreter_path = str(interp)  # prefer subprocess...
     report = eng.check(tmp_path)
 
     assert report is not None
     # subprocess tried first, then in-process fallback
     assert calls == ["subprocess", "in_process"]
+
+
+# --------------------------------------------------------------------------- #
+# _is_server_environment compares via sys.prefix, not resolve(sys.executable)
+# (fix #2).
+# --------------------------------------------------------------------------- #
+def test_is_server_environment_via_sys_prefix_with_symlinked_python(tmp_path, monkeypatch):
+    # Production layout: the server venv's python is a symlink escaping to the
+    # pyenv base, but rextio sits in <sys.prefix>/bin and resolves in place.
+    # Classification must key off sys.prefix, not resolve(sys.executable).
+    venv = tmp_path / ".venv"
+    bindir = venv / "bin"
+    bindir.mkdir(parents=True)
+    rextio = bindir / "rextio"
+    rextio.write_text("", encoding="utf-8")
+    # a python symlink pointing OUT of the venv (as pyenv/uv venvs create)
+    pyenv_base = tmp_path / "pyenv" / "bin"
+    pyenv_base.mkdir(parents=True)
+    (pyenv_base / "python").write_text("", encoding="utf-8")
+    (bindir / "python").symlink_to(pyenv_base / "python")
+
+    monkeypatch.setattr(engine.sys, "prefix", str(venv))
+    assert engine._is_server_environment(rextio) is True
+
+
+def test_is_server_environment_foreign_venv_is_not_server(tmp_path, monkeypatch):
+    server_venv = tmp_path / "server"
+    (server_venv / "bin").mkdir(parents=True)
+    other_bin = tmp_path / "other" / "bin"
+    other_bin.mkdir(parents=True)
+    foreign = other_bin / "rextio"
+    foreign.write_text("", encoding="utf-8")
+    monkeypatch.setattr(engine.sys, "prefix", str(server_venv))
+    assert engine._is_server_environment(foreign) is False
+
+
+# --------------------------------------------------------------------------- #
+# _try_subprocess swallows unexpected escapes symmetrically (fix #8).
+# --------------------------------------------------------------------------- #
+def test_try_subprocess_swallows_unexpected_exception(tmp_path, monkeypatch):
+    fake = tmp_path / "rextio"
+
+    def boom(binary, argv):
+        raise RuntimeError("unforeseen escape")
+
+    monkeypatch.setattr(engine, "_run_subprocess", boom)
+    # a non-AcquisitionError escape is logged and returns None (so the other
+    # acquisition path can still be tried), never propagated.
+    assert engine._try_subprocess("check", fake, ["check"]) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -139,7 +207,7 @@ def test_acquire_json_returns_none_when_subprocess_fails_and_no_in_process(tmp_p
     monkeypatch.setattr(engine, "_rextio_available_in_process", lambda: False)
     monkeypatch.setattr(engine, "find_rextio_binary", lambda root, ip=None: script)
     eng = engine.Engine()
-    eng.interpreter_path = "/opt/py/bin/python"
+    eng.interpreter_path = str(tmp_path / "python")  # script is its neighbour
     assert eng.check(tmp_path) is None
 
 

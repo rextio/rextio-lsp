@@ -66,6 +66,11 @@ class DiagnosticRecord:
     column: int
     function_name: str | None = None
     suggestion: str | None = None
+    # Optional end span (contract line 1-based, column 0-based). Present on many
+    # records; when both are set the LSP diagnostic uses the real span rather
+    # than a zero-width range (see ``to_lsp_diagnostic``).
+    end_line: int | None = None
+    end_column: int | None = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +152,16 @@ def is_contract_supported(version: str | None) -> bool:
     return parse_major(version) == SUPPORTED_CONTRACT_MAJOR
 
 
+def _optional_int(value: Any) -> int | None:
+    """Coerce a raw contract value to ``int`` or ``None`` (never raises)."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_diagnostic(raw: dict[str, Any]) -> DiagnosticRecord:
     return DiagnosticRecord(
         code=str(raw.get("code", "")),
@@ -157,6 +172,8 @@ def _parse_diagnostic(raw: dict[str, Any]) -> DiagnosticRecord:
         column=int(raw.get("column", 0)),
         function_name=raw.get("function_name"),
         suggestion=raw.get("suggestion"),
+        end_line=_optional_int(raw.get("end_line")),
+        end_column=_optional_int(raw.get("end_column")),
     )
 
 

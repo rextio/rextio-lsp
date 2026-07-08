@@ -35,6 +35,16 @@ def capabilities_boundary() -> dict[str, Any]:
     return load_fixture("capabilities_boundary.json")
 
 
+@pytest.fixture
+def check_syntax_error() -> dict[str, Any]:
+    """Real ``check --format json`` for a file with a syntax error.
+
+    Zero functions; a single top-level RXT000 parse diagnostic (duplicated in
+    the owning module's ``diagnostics``, as rextio emits it).
+    """
+    return load_fixture("check_syntax_error.json")
+
+
 rextio_available = importlib.util.find_spec("rextio.cli.main") is not None
 
 needs_rextio = pytest.mark.needs_rextio

@@ -42,11 +42,38 @@ def lsp_line(contract_line: int) -> int:
 def lsp_character(contract_column: int) -> int:
     """Convert a contract column to a 0-based LSP character.
 
-    Contract columns are already 0-based ``ast.col_offset`` values, so this is
-    an identity clamp; it exists to document the (asymmetric) position
-    convention and to guard against malformed negative offsets.
+    Contract columns are already 0-based ``ast.col_offset`` values -- but they
+    are UTF-8 *byte* offsets, whereas LSP positions default to UTF-16 code
+    units. This clamp is the byte-offset *fallback* used when the document's
+    line text is unavailable (see :func:`utf16_character` for the accurate
+    conversion). It also guards against malformed negative offsets.
     """
     return max(contract_column, 0)
+
+
+def utf16_len(text: str) -> int:
+    """Length of ``text`` in UTF-16 code units (non-BMP chars count as 2)."""
+    return sum(2 if ord(ch) > 0xFFFF else 1 for ch in text)
+
+
+def utf16_character(line_text: str, byte_offset: int) -> int:
+    """Map a UTF-8 byte offset within ``line_text`` to a UTF-16 code unit index.
+
+    Contract columns are ``ast.col_offset`` values: 0-based offsets into the
+    line's UTF-8 *bytes*. LSP positions default to UTF-16 code units, so a line
+    with multi-byte characters (e.g. ``x = "한글" + f(1)``, where ``f`` is byte
+    15 but UTF-16 index 11) needs conversion. Decode the byte prefix, then sum
+    its UTF-16 code-unit lengths. A ``byte_offset`` landing inside a multi-byte
+    sequence decodes the largest valid prefix.
+    """
+    if byte_offset <= 0:
+        return 0
+    prefix = line_text.encode("utf-8")[:byte_offset]
+    try:
+        decoded = prefix.decode("utf-8")
+    except UnicodeDecodeError:
+        decoded = prefix.decode("utf-8", errors="ignore")
+    return utf16_len(decoded)
 
 
 @dataclass(frozen=True)
@@ -134,6 +161,27 @@ class CapabilityManifest:
                 if rule.diagnostic_code and rule.diagnostic_code not in self._by_code:
                     self._by_code[rule.diagnostic_code] = rule
         return self._by_code.get(code)
+
+    def cache_key(self) -> str | None:
+        """Composite cache key, or ``None`` when the manifest is not cache-safe.
+
+        Per the tooling contract, consumers MUST key a cached manifest on
+        ``(config_fingerprint, rextio_version, sorted plugin id+version)`` -- the
+        fingerprint alone hashes only the resolved config (plugin *ids*, not
+        their versions). A plugin whose ``version`` is ``None`` (no distribution
+        metadata) is explicitly NOT cache-safe: such a manifest returns ``None``
+        so the caller always re-acquires it.
+        """
+        plugin_parts: list[str] = []
+        for plugin in self.plugins:
+            version = plugin.get("version")
+            if version is None:
+                return None
+            plugin_parts.append(f"{plugin.get('id', '')}@{version}")
+        plugin_parts.sort()
+        return "\x00".join(
+            (self.config_fingerprint, self.rextio_version, *plugin_parts)
+        )
 
 
 def parse_major(version: str | None) -> int | None:

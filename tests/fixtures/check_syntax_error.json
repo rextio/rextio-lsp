@@ -1,0 +1,36 @@
+{
+  "contract_version": "1.0.0",
+  "project_root": "/proj",
+  "diagnostics": [
+    {
+      "code": "RXT000",
+      "column": 11,
+      "file_path": "/proj/src/broken/bad.py",
+      "function_name": null,
+      "line": 1,
+      "message": "Python parse error: '(' was never closed",
+      "severity": "error",
+      "suggestion": null
+    }
+  ],
+  "modules": [
+    {
+      "diagnostics": [
+        {
+          "code": "RXT000",
+          "column": 11,
+          "file_path": "/proj/src/broken/bad.py",
+          "function_name": null,
+          "line": 1,
+          "message": "Python parse error: '(' was never closed",
+          "severity": "error",
+          "suggestion": null
+        }
+      ],
+      "file_path": "/proj/src/broken/bad.py",
+      "functions": [],
+      "module_name": "broken.bad",
+      "top_level": null
+    }
+  ]
+}

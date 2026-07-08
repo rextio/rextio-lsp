@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from rextio_lsp.contract import (
     INFORMATIONAL_CODES,
+    CapabilityManifest,
     is_contract_supported,
     lsp_character,
     lsp_line,
     parse_capabilities,
     parse_check_report,
     parse_major,
+    utf16_character,
+    utf16_len,
 )
 
 
@@ -102,3 +105,87 @@ def test_parse_tolerates_unknown_and_missing_fields():
     assert report.functions == ()
     manifest = parse_capabilities({"contract_version": "1.0.0"})
     assert manifest.rules == ()
+
+
+def test_parse_check_report_captures_top_level_diagnostics(check_syntax_error):
+    report = parse_check_report(check_syntax_error)
+    assert report.functions == ()
+    assert len(report.top_level_diagnostics) == 1
+    diag = report.top_level_diagnostics[0]
+    assert diag.code == "RXT000"
+    assert diag.file_path == "/proj/src/broken/bad.py"
+
+
+# --------------------------------------------------------------------------- #
+# UTF-8 byte offset -> UTF-16 code unit conversion.
+# --------------------------------------------------------------------------- #
+def test_utf16_character_korean_line():
+    # ast.col_offset is a UTF-8 byte offset: `f` sits at byte 15 but UTF-16
+    # index 11 (each Hangul syllable is 3 UTF-8 bytes but 1 UTF-16 unit).
+    line = 'x = "한글" + f(1)'
+    assert line.encode("utf-8")[15:16] == b"f"
+    assert utf16_character(line, 15) == 11
+
+
+def test_utf16_character_emoji_is_surrogate_pair():
+    # a non-BMP emoji counts as TWO UTF-16 code units (surrogate pair).
+    line = 'y = "😀" + g()'
+    assert utf16_character(line, 13) == 11  # `g` byte 13 -> utf16 index 11
+    assert utf16_len("😀") == 2
+
+
+def test_utf16_character_ascii_passthrough():
+    assert utf16_character("abcdef", 4) == 4
+    assert utf16_character("abc", 0) == 0
+    assert utf16_character("abc", -1) == 0
+
+
+def test_utf16_character_offset_inside_multibyte_sequence():
+    # a byte offset landing mid-character decodes the largest valid prefix.
+    line = "한글"  # 6 UTF-8 bytes, 2 UTF-16 units
+    assert utf16_character(line, 1) == 0  # inside the first 3-byte sequence
+    assert utf16_character(line, 3) == 1  # exactly after the first char
+
+
+# --------------------------------------------------------------------------- #
+# Composite manifest cache key (tooling-contract lines ~141-150).
+# --------------------------------------------------------------------------- #
+def _manifest(fingerprint, version, plugins):
+    return CapabilityManifest(
+        contract_version="1.0.0",
+        config_fingerprint=fingerprint,
+        rextio_version=version,
+        project_root="/proj",
+        plugins=tuple(plugins),
+    )
+
+
+def test_cache_key_folds_fingerprint_version_and_plugins():
+    m1 = _manifest("fp", "0.1.1", [{"id": "a", "version": "1.0"}])
+    m2 = _manifest("fp", "0.1.1", [{"id": "a", "version": "1.0"}])
+    assert m1.cache_key() == m2.cache_key()
+    # rextio version participates
+    assert m1.cache_key() != _manifest("fp", "0.1.2", [{"id": "a", "version": "1.0"}]).cache_key()
+    # plugin version participates
+    assert m1.cache_key() != _manifest("fp", "0.1.1", [{"id": "a", "version": "2.0"}]).cache_key()
+    # fingerprint participates
+    assert m1.cache_key() != _manifest("gp", "0.1.1", [{"id": "a", "version": "1.0"}]).cache_key()
+
+
+def test_cache_key_plugin_order_insensitive():
+    a = _manifest("fp", "0.1.1", [{"id": "a", "version": "1.0"}, {"id": "b", "version": "2.0"}])
+    b = _manifest("fp", "0.1.1", [{"id": "b", "version": "2.0"}, {"id": "a", "version": "1.0"}])
+    assert a.cache_key() == b.cache_key()
+
+
+def test_cache_key_null_plugin_version_is_uncacheable():
+    m = _manifest("fp", "0.1.1", [{"id": "a", "version": None}])
+    assert m.cache_key() is None
+    # a mix with one null version is still uncacheable
+    mixed = _manifest("fp", "0.1.1", [{"id": "a", "version": "1.0"}, {"id": "b", "version": None}])
+    assert mixed.cache_key() is None
+
+
+def test_cache_key_no_plugins_is_cacheable():
+    m = _manifest("fp", "0.1.1", [])
+    assert m.cache_key() is not None

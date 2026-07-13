@@ -34,7 +34,9 @@ from rextio_lsp.server import (
     to_lsp_diagnostic,
 )
 
-PIPELINE = "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py"
+PIPELINE = (
+    "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py"
+)
 
 
 def _setup_workspace(server: RextioLanguageServer, *docs: tuple[str, str]) -> None:
@@ -299,7 +301,9 @@ def test_code_lenses_for_titles_and_args(check_boundary):
         assert lens.command.command == ROUTE_INFO_COMMAND
         assert len(lens.command.arguments) == 1
     # square is defined on line 5 (1-based) -> LSP line 4
-    square = next(lens for lens in lenses if lens.command.arguments == ["boundary_demo.pipeline.square"])
+    square = next(
+        lens for lens in lenses if lens.command.arguments == ["boundary_demo.pipeline.square"]
+    )
     assert square.range.start.line == 4
 
 
@@ -471,9 +475,7 @@ def test_watched_files_change_invalidates_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_debounce", lambda _root: None)  # no timer in test
     params = lsp.DidChangeWatchedFilesParams(
         changes=[
-            lsp.FileEvent(
-                uri=(tmp_path / "rextio.toml").as_uri(), type=lsp.FileChangeType.Changed
-            )
+            lsp.FileEvent(uri=(tmp_path / "rextio.toml").as_uri(), type=lsp.FileChangeType.Changed)
         ]
     )
     server.handle_watched_files_change(params)
@@ -746,9 +748,7 @@ def test_toml_deleted_clears_project(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_debounce", lambda r: debounced.append(r))
     params = lsp.DidChangeWatchedFilesParams(
         changes=[
-            lsp.FileEvent(
-                uri=(tmp_path / "rextio.toml").as_uri(), type=lsp.FileChangeType.Deleted
-            )
+            lsp.FileEvent(uri=(tmp_path / "rextio.toml").as_uri(), type=lsp.FileChangeType.Deleted)
         ]
     )
     server.handle_watched_files_change(params)
@@ -919,15 +919,13 @@ def test_diagnostics_for_file_rxt000_ascii_line_placement_both_contracts():
     }
     report2 = parse_check_report({"contract_version": "2.0.0", "diagnostics": [record2]})
     assert (
-        diagnostics_for_file(report2, module, degraded=False, lines=[line])[0]
-        .range.start.character
+        diagnostics_for_file(report2, module, degraded=False, lines=[line])[0].range.start.character
         == 10
     )
     record1 = {**record2, "column": 11}  # 1-based code point at '('
     report1 = parse_check_report({"contract_version": "1.0.0", "diagnostics": [record1]})
     assert (
-        diagnostics_for_file(report1, module, degraded=False, lines=[line])[0]
-        .range.start.character
+        diagnostics_for_file(report1, module, degraded=False, lines=[line])[0].range.start.character
         == 10
     )
 
@@ -1102,9 +1100,7 @@ def test_code_action_replaces_native_with_nested_paren_string_arg():
 def test_code_action_replaces_native_with_call_arg():
     # a nested call `f(x)` in the argument list is spanned by paren balance.
     text = (
-        "@rextio.native(target=f(x))\n"
-        "def rejected(xs: list[int]) -> int:\n"
-        "    return helper(xs)\n"
+        "@rextio.native(target=f(x))\ndef rejected(xs: list[int]) -> int:\n    return helper(xs)\n"
     )
     (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
     assert _apply(text, edit) == "@rextio.exempt"
@@ -1140,9 +1136,7 @@ def test_code_action_span_ignores_paren_inside_string():
     # a `)` inside a string literal must NOT end the span early: a naive scan
     # would stop there and yield a corrupting `@rextio.exempt b")`.
     text = (
-        '@rextio.native(target="a)b")\n'
-        "def rejected(xs: list[int]) -> int:\n"
-        "    return helper(xs)\n"
+        '@rextio.native(target="a)b")\ndef rejected(xs: list[int]) -> int:\n    return helper(xs)\n'
     )
     (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
     assert _apply(text, edit) == "@rextio.exempt"
@@ -1151,9 +1145,7 @@ def test_code_action_span_ignores_paren_inside_string():
 def test_code_action_span_string_is_only_a_close_paren():
     # the string content is a bare `)`; the real arg-list close is the last `)`.
     text = (
-        '@rextio.native(target=")")\n'
-        "def rejected(xs: list[int]) -> int:\n"
-        "    return helper(xs)\n"
+        '@rextio.native(target=")")\ndef rejected(xs: list[int]) -> int:\n    return helper(xs)\n'
     )
     (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
     assert _apply(text, edit) == "@rextio.exempt"
@@ -1163,9 +1155,7 @@ def test_code_action_span_ignores_open_paren_inside_single_quotes():
     # an unbalanced `(` inside a single-quoted string must not inflate the balance
     # (else the real close paren would be mistaken for an inner one).
     text = (
-        "@rextio.native(target='a(b')\n"
-        "def rejected(xs: list[int]) -> int:\n"
-        "    return helper(xs)\n"
+        "@rextio.native(target='a(b')\ndef rejected(xs: list[int]) -> int:\n    return helper(xs)\n"
     )
     (edit,) = _exempt_edit_apply(text)[0].edit.changes["file:///proj/ops.py"]
     assert _apply(text, edit) == "@rextio.exempt"
@@ -1175,9 +1165,7 @@ def test_code_action_withheld_for_unterminated_string_in_args():
     # an unterminated string literal on the decorator line is ambiguous: withhold
     # the fix rather than guess a span.
     text = (
-        '@rextio.native(target="oops)\n'
-        "def rejected(xs: list[int]) -> int:\n"
-        "    return helper(xs)\n"
+        '@rextio.native(target="oops)\ndef rejected(xs: list[int]) -> int:\n    return helper(xs)\n'
     )
     assert _exempt_edit_apply(text) == []
 
@@ -1297,12 +1285,7 @@ def test_find_native_decorator_multiline_sibling_above_native():
 def test_code_action_offered_over_sibling_string_paren_full_path():
     # drive F2 through the real code-action path, not just the locator.
     module = "/proj/ops.py"
-    text = (
-        '@foo("(")\n'
-        "@rextio.native\n"
-        "def rejected(xs: list[int]) -> int:\n"
-        "    return helper(xs)\n"
-    )
+    text = '@foo("(")\n@rextio.native\ndef rejected(xs: list[int]) -> int:\n    return helper(xs)\n'
     report = _rejected_report(module, def_line=3, diag_line=4)
     diags = diagnostics_for_file(report, module, degraded=False)
     actions = code_actions_for(
@@ -1488,9 +1471,7 @@ def test_deleted_toml_discards_in_flight_analysis(tmp_path, monkeypatch):
     # the toml is deleted while the analysis is in flight
     params = lsp.DidChangeWatchedFilesParams(
         changes=[
-            lsp.FileEvent(
-                uri=(root / "rextio.toml").as_uri(), type=lsp.FileChangeType.Deleted
-            )
+            lsp.FileEvent(uri=(root / "rextio.toml").as_uri(), type=lsp.FileChangeType.Deleted)
         ]
     )
     server.handle_watched_files_change(params)
@@ -1539,9 +1520,7 @@ def test_changed_toml_midrun_ends_with_fresh_rerun(tmp_path, monkeypatch):
     # a Changed event mid-run bumps the generation and debounces a fresh re-run
     params = lsp.DidChangeWatchedFilesParams(
         changes=[
-            lsp.FileEvent(
-                uri=(root / "rextio.toml").as_uri(), type=lsp.FileChangeType.Changed
-            )
+            lsp.FileEvent(uri=(root / "rextio.toml").as_uri(), type=lsp.FileChangeType.Changed)
         ]
     )
     server.handle_watched_files_change(params)
@@ -1592,9 +1571,7 @@ def test_deleted_toml_during_capabilities_warm_discards_analysis(tmp_path, monke
     # the toml is deleted while the warm is in flight
     params = lsp.DidChangeWatchedFilesParams(
         changes=[
-            lsp.FileEvent(
-                uri=(root / "rextio.toml").as_uri(), type=lsp.FileChangeType.Deleted
-            )
+            lsp.FileEvent(uri=(root / "rextio.toml").as_uri(), type=lsp.FileChangeType.Deleted)
         ]
     )
     server.handle_watched_files_change(params)

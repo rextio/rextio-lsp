@@ -1,8 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 — 2026-07-13 (release candidate; not tagged or uploaded)
 
-### Tooling contract dual-map (protocol, not a package release)
+Package version is set to `0.1.1` for this branch. This section finalizes the
+dual-map work as a release candidate; no git tag and no package upload have
+been cut yet.
+
+### Tooling contract dual-map
 
 - Supports tooling-contract majors `{1, 2}` (not major-only `1`). Major 2 is
   the standardized producer: every diagnostic column, including `RXT000`, is a
@@ -12,9 +16,11 @@
 - Closes the mixed-version hole where a major-1-only gate would silently accept
   a 2.x producer and misplace `RXT000`. Unsupported majors (e.g. 3+) still
   degrade to generic diagnostics.
-- **Release ordering:** ship this dual-map LSP before (or with) core that emits
-  `contract_version` `2.0.0`. Package version remains unreleased on the
-  `0.1.1` line.
+- **Safe deployment order:** ship dual-map LSP `0.1.1` first, or simultaneously
+  with core `0.1.2` / tooling-contract major `2` (`contract_version` `2.0.0`).
+  Core must not ship alone first: a contract-2 producer against a major-1-only
+  LSP would misplace `RXT000`. `rextio` remains a tooling-contract peer, not a
+  runtime package dependency of this LSP.
 
 ## 0.1.0 — 2026-07-12
 

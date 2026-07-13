@@ -58,9 +58,7 @@ def uri_to_path(uri: str) -> Path | None:
     return Path(fs_path)
 
 
-def find_rextio_binary(
-    project_root: Path, interpreter_path: str | None = None
-) -> Path | None:
+def find_rextio_binary(project_root: Path, interpreter_path: str | None = None) -> Path | None:
     """Locate a ``rextio`` executable to use for the subprocess fallback.
 
     Preference order:

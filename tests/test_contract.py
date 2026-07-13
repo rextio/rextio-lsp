@@ -51,7 +51,9 @@ def test_parse_check_report_accepted_shape(check_pure_math):
 
 def test_functions_in_file_filters_by_path(check_boundary):
     report = parse_check_report(check_boundary)
-    path = "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py"
+    path = (
+        "/Volumes/Data/workspace/rextio/rextio/examples/boundary_demo/src/boundary_demo/pipeline.py"
+    )
     fns = report.functions_in_file(path)
     assert fns
     assert all(fn.file_path == path for fn in fns)

@@ -212,9 +212,7 @@ class CapabilityManifest:
                 return None
             plugin_parts.append(f"{plugin.get('id', '')}@{version}")
         plugin_parts.sort()
-        return "\x00".join(
-            (self.config_fingerprint, self.rextio_version, *plugin_parts)
-        )
+        return "\x00".join((self.config_fingerprint, self.rextio_version, *plugin_parts))
 
 
 def parse_major(version: str | None) -> int | None:
@@ -309,9 +307,7 @@ def parse_check_report(data: dict[str, Any]) -> ProjectReport:
             if isinstance(fn, dict):
                 functions.append(_parse_function(fn))
     top = tuple(
-        _parse_diagnostic(d)
-        for d in data.get("diagnostics", ()) or ()
-        if isinstance(d, dict)
+        _parse_diagnostic(d) for d in data.get("diagnostics", ()) or () if isinstance(d, dict)
     )
     return ProjectReport(
         contract_version=str(data.get("contract_version", "")),
@@ -335,12 +331,8 @@ def _parse_rule(raw: dict[str, Any]) -> RuleRecord:
 
 def parse_capabilities(data: dict[str, Any]) -> CapabilityManifest:
     """Parse a ``capabilities --format json`` payload into a manifest."""
-    rules = tuple(
-        _parse_rule(r) for r in data.get("rules", ()) or () if isinstance(r, dict)
-    )
-    plugins = tuple(
-        p for p in data.get("plugins", ()) or () if isinstance(p, dict)
-    )
+    rules = tuple(_parse_rule(r) for r in data.get("rules", ()) or () if isinstance(r, dict))
+    plugins = tuple(p for p in data.get("plugins", ()) or () if isinstance(p, dict))
     return CapabilityManifest(
         contract_version=str(data.get("contract_version", "")),
         config_fingerprint=str(data.get("config_fingerprint", "")),

@@ -118,9 +118,7 @@ def latency_log(project_root: Path, elapsed: float) -> tuple[lsp.MessageType, st
     Info when the check exceeds :data:`LATENCY_WARN_SECONDS`, Log otherwise.
     """
     message = f"rextio check {project_root}: {elapsed:.2f}s"
-    msg_type = (
-        lsp.MessageType.Info if elapsed > LATENCY_WARN_SECONDS else lsp.MessageType.Log
-    )
+    msg_type = lsp.MessageType.Info if elapsed > LATENCY_WARN_SECONDS else lsp.MessageType.Log
     return msg_type, message
 
 
@@ -288,9 +286,7 @@ def diagnostics_for_file(
     return diagnostics
 
 
-def project_scope_diagnostics(
-    report: ProjectReport, *, degraded: bool
-) -> list[lsp.Diagnostic]:
+def project_scope_diagnostics(report: ProjectReport, *, degraded: bool) -> list[lsp.Diagnostic]:
     """Top-level diagnostics with no ``file_path`` (project-scope).
 
     Published against the project's ``rextio.toml`` URI (there is no source file
@@ -308,9 +304,7 @@ def project_scope_diagnostics(
     ]
 
 
-def function_at_line(
-    report: ProjectReport, file_path: str, line: int
-) -> FunctionReport | None:
+def function_at_line(report: ProjectReport, file_path: str, line: int) -> FunctionReport | None:
     """Return the function whose definition is on 0-based LSP ``line``."""
     for fn in report.functions_in_file(file_path):
         if lsp_line(fn.line) == line:
@@ -318,9 +312,7 @@ def function_at_line(
     return None
 
 
-def _guidance_line(
-    code: str, manifest: CapabilityManifest | None, *, degraded: bool
-) -> str:
+def _guidance_line(code: str, manifest: CapabilityManifest | None, *, degraded: bool) -> str:
     """Render one ``- `CODE` — guidance`` bullet, guidance from the manifest."""
     guidance = None
     if not degraded and manifest is not None:
@@ -602,12 +594,8 @@ def code_actions_for(
         # preserved.
         edit = lsp.TextEdit(
             range=lsp.Range(
-                start=lsp.Position(
-                    line=dec_idx, character=utf16_len(original[:start_char])
-                ),
-                end=lsp.Position(
-                    line=dec_idx, character=utf16_len(original[:end_char])
-                ),
+                start=lsp.Position(line=dec_idx, character=utf16_len(original[:start_char])),
+                end=lsp.Position(line=dec_idx, character=utf16_len(original[:end_char])),
             ),
             new_text="@rextio.exempt",
         )
@@ -714,9 +702,7 @@ class RextioLanguageServer(LanguageServer):
                             method=lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES,
                             register_options=lsp.DidChangeWatchedFilesRegistrationOptions(
                                 watchers=[
-                                    lsp.FileSystemWatcher(
-                                        glob_pattern=f"**/{CONFIG_FILENAME}"
-                                    )
+                                    lsp.FileSystemWatcher(glob_pattern=f"**/{CONFIG_FILENAME}")
                                 ]
                             ),
                         )
@@ -980,9 +966,7 @@ class RextioLanguageServer(LanguageServer):
         degraded = self._degraded.get(str(root), False)
         manifest = None if degraded else self.engine.capabilities(root)
         markdown = build_hover_markdown(fn, manifest, degraded=degraded)
-        return lsp.Hover(
-            contents=lsp.MarkupContent(kind=lsp.MarkupKind.Markdown, value=markdown)
-        )
+        return lsp.Hover(contents=lsp.MarkupContent(kind=lsp.MarkupKind.Markdown, value=markdown))
 
     # -- latency ------------------------------------------------------------ #
     def _record_check_duration(self, project_root: Path, elapsed: float) -> None:
@@ -1022,9 +1006,7 @@ class RextioLanguageServer(LanguageServer):
             context_diagnostics=list(params.context.diagnostics),
         )
 
-    def _report_and_path_for_uri(
-        self, uri: str
-    ) -> tuple[ProjectReport, Path] | None:
+    def _report_and_path_for_uri(self, uri: str) -> tuple[ProjectReport, Path] | None:
         """Resolve ``uri`` to (cached-or-fresh report, resolved path) or ``None``."""
         path = uri_to_path(uri)
         if path is None:
@@ -1042,9 +1024,7 @@ class RextioLanguageServer(LanguageServer):
         return report, resolved
 
     # -- rextio.toml watch -------------------------------------------------- #
-    def handle_watched_files_change(
-        self, params: lsp.DidChangeWatchedFilesParams
-    ) -> None:
+    def handle_watched_files_change(self, params: lsp.DidChangeWatchedFilesParams) -> None:
         """On a ``rextio.toml`` change, drop its cache entry and re-analyze.
 
         A deletion instead clears the project entirely: its manifest cache is
@@ -1112,9 +1092,7 @@ def create_server() -> RextioLanguageServer:
         return ls.hover_for(params.text_document.uri, params.position)
 
     @server.feature(lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES)
-    def _watched(
-        ls: RextioLanguageServer, params: lsp.DidChangeWatchedFilesParams
-    ) -> None:
+    def _watched(ls: RextioLanguageServer, params: lsp.DidChangeWatchedFilesParams) -> None:
         ls.handle_watched_files_change(params)
 
     return server

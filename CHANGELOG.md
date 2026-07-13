@@ -4,7 +4,7 @@
 
 Package version is set to `0.1.1` for this branch. This section finalizes the
 dual-map work as a release candidate; no git tag and no package upload have
-been cut yet.
+been cut yet. The last **published** release remains **0.1.0** (2026-07-12).
 
 ### Tooling contract dual-map
 
@@ -16,9 +16,10 @@ been cut yet.
 - Closes the mixed-version hole where a major-1-only gate would silently accept
   a 2.x producer and misplace `RXT000`. Unsupported majors (e.g. 3+) still
   degrade to generic diagnostics.
-- **Safe deployment order:** ship dual-map LSP `0.1.1` first, or simultaneously
-  with core `0.1.2` / tooling-contract major `2` (`contract_version` `2.0.0`).
-  Core must not ship alone first: a contract-2 producer against a major-1-only
+- **Safe deployment order (required):** merge and release dual-map
+  **rextio-lsp 0.1.1** first; then core **rextio 0.1.2** (tooling-contract
+  major `2`, `contract_version` `2.0.0`); then **rextio-numpy 0.1.1**. Core
+  must not ship alone first: a contract-2 producer against a major-1-only
   LSP would misplace `RXT000`. `rextio` remains a tooling-contract peer, not a
   runtime package dependency of this LSP.
 

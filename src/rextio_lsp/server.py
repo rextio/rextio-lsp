@@ -141,27 +141,17 @@ def map_severity(code: str, *, is_rejection: bool) -> lsp.DiagnosticSeverity:
     return lsp.DiagnosticSeverity.Information
 
 
-def _character_at(
-    lines: list[str] | None, contract_line: int, column: int, code: str = ""
-) -> int:
+def _character_at(lines: list[str] | None, contract_line: int, column: int) -> int:
     """LSP character for a contract (1-based line, UTF-8 byte ``column``).
 
-    Contract columns are UTF-8 byte offsets; LSP positions default to UTF-16
-    code units. When the document's line text is available, convert the byte
-    offset accurately (see :func:`utf16_character`); otherwise fall back to the
-    raw byte offset (:func:`lsp_character`).
-
-    ``RXT000`` (syntax error) is a documented exception: core emits its column
-    as ``SyntaxError.offset`` -- a **1-based CODE POINT** offset -- not the
-    0-based UTF-8 byte offset every other diagnostic uses. It is special-cased
-    here (subtract 1, clamp, then map code points -> UTF-16 via the line text;
-    without line text, subtract 1 and pass through). This is a core contract
-    inconsistency to be normalized upstream in a future core release; until
-    then the server compensates so RXT000 lands correctly on non-ASCII lines.
+    Every diagnostic code (including ``RXT000``) uses the same contract: columns
+    are 0-based UTF-8 byte offsets. LSP positions default to UTF-16 code units.
+    When the document's line text is available, convert the byte offset
+    accurately (see :func:`utf16_character`); otherwise fall back to the raw
+    byte offset (:func:`lsp_character`).
     """
     # Defensive: the parse now coerces a null/junk column to 0 (see
-    # contract._int_or), but guard here too so a None can never reach the
-    # arithmetic below (int(None) - 1 would raise).
+    # contract._int_or), but guard here too so a None never reaches the mapping.
     if column is None:
         column = 0
     line_text: str | None = None
@@ -169,11 +159,6 @@ def _character_at(
         idx = lsp_line(contract_line)
         if 0 <= idx < len(lines):
             line_text = lines[idx]
-    if code == "RXT000":
-        col0 = max(column - 1, 0)
-        if line_text is not None:
-            return utf16_len(line_text[:col0])
-        return col0
     if line_text is not None:
         return utf16_character(line_text, column)
     return lsp_character(column)
@@ -196,15 +181,13 @@ def to_lsp_diagnostic(
     """
     start = lsp.Position(
         line=lsp_line(record.line),
-        character=_character_at(lines, record.line, record.column, record.code),
+        character=_character_at(lines, record.line, record.column),
     )
     # Use the real span when the record carries one; else a zero-width range.
     if record.end_line is not None and record.end_column is not None:
         end = lsp.Position(
             line=lsp_line(record.end_line),
-            character=_character_at(
-                lines, record.end_line, record.end_column, record.code
-            ),
+            character=_character_at(lines, record.end_line, record.end_column),
         )
     else:
         end = start

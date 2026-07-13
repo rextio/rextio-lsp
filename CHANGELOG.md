@@ -1,10 +1,9 @@
 # Changelog
 
-## 0.1.1 — 2026-07-13 (release candidate; not tagged or uploaded)
+## 0.1.1 — 2026-07-14
 
-Package version is set to `0.1.1` for this branch. This section finalizes the
-dual-map work as a release candidate; no git tag and no package upload have
-been cut yet. The last **published** release remains **0.1.0** (2026-07-12).
+Package version `0.1.1`. This release finalizes the dual-map work. It follows
+the previous release, **0.1.0** (2026-07-12).
 
 ### Tooling contract dual-map
 

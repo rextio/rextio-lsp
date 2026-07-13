@@ -4,12 +4,10 @@
 
 A Python (pygls) LSP server that consumes Rextio’s tooling-contract JSON and reports per-function execution routes (`native-direct`, `native-plugin:<id>`, `native-shim`, `fallback-python`, `fallback-accelerated:numba`, `rejected:<RXT>`) with actionable promotion guidance.
 
-## Status: 0.1.1 release candidate
+## Status: 0.1.1
 
-This repository branch is the **0.1.1 release candidate** for package version
-`rextio-lsp` **0.1.1**. It is an **untagged / unuploaded** RC on this branch —
-**not** a claim that 0.1.1 is published on PyPI. The last **published** cut is
-**`rextio-lsp` 0.1.0** (2026-07-12 on PyPI).
+This is package version `rextio-lsp` **0.1.1**, the current release. It
+supersedes the previous cut, **`rextio-lsp` 0.1.0** (2026-07-12).
 
 ### What 0.1.1 adds (dual-map)
 
@@ -30,7 +28,7 @@ Publish / deploy in this **strict** order — no simultaneous ship:
 
 Core must not publish alone first: a contract-`2.x` producer against major-1-only **rextio-lsp 0.1.0** is an unsupported pairing and can misplace `RXT000`.
 
-See the [CHANGELOG](https://github.com/rextio/rextio-lsp/blob/main/CHANGELOG.md) for the full RC notes and the preserved 0.1.0 history.
+See the [CHANGELOG](https://github.com/rextio/rextio-lsp/blob/main/CHANGELOG.md) for the full release notes and the preserved 0.1.0 history.
 
 ## Designed to coexist
 
@@ -82,7 +80,7 @@ Install into the project environment so the server stays in version lock-step wi
 pip install rextio-lsp
 ```
 
-> **Note:** `pip install rextio-lsp` currently resolves the **published** package (**0.1.0**) until 0.1.1 is tagged and uploaded. To exercise this dual-map RC, install from a source checkout of this branch (see Development).
+> **Note:** `pip install rextio-lsp` installs **0.1.1** (the current release). To hack on the server itself, install from a source checkout of this branch instead (see Development).
 
 The server speaks LSP over stdio via the `rextio-lsp` console script (equivalently `python -m rextio_lsp`).
 
@@ -141,9 +139,9 @@ Contributor and agent guidance lives in the repository (`AGENTS.md`).
 
 ## Compatibility floors
 
-| Component | Floor on this RC branch |
+| Component | Floor |
 |---|---|
-| Package version | `0.1.1` (RC; see `__about__.__version__`) |
+| Package version | `0.1.1` (see `__about__.__version__`) |
 | Python | `>= 3.11` |
 | pygls | `>= 2.1, < 3` |
 | Tooling-contract majors | `{1, 2}` fully supported; other majors → degraded |

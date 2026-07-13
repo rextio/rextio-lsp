@@ -5,7 +5,7 @@
     "boundary_demo.pipeline.sum_squares"
   ],
   "accepted_native_top_levels": [],
-  "contract_version": "1.0.0",
+  "contract_version": "2.0.0",
   "diagnostics": [
     {
       "code": "RXT075",

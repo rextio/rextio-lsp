@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Tooling contract dual-map (protocol, not a package release)
+
+- Supports tooling-contract majors `{1, 2}` (not major-only `1`). Major 2 is
+  the standardized producer: every diagnostic column, including `RXT000`, is a
+  0-based UTF-8 byte offset. Major 1 retains the legacy `RXT000` special case
+  (1-based Unicode code-point `SyntaxError.offset`). Non-`RXT000` diagnostics
+  stay UTF-8-byte → UTF-16 on both majors.
+- Closes the mixed-version hole where a major-1-only gate would silently accept
+  a 2.x producer and misplace `RXT000`. Unsupported majors (e.g. 3+) still
+  degrade to generic diagnostics.
+- **Release ordering:** ship this dual-map LSP before (or with) core that emits
+  `contract_version` `2.0.0`. Package version remains unreleased on the
+  `0.1.1` line.
+
 ## 0.1.0 — 2026-07-12
 
 Initial release of the Rextio LSP server (pygls >= 2.1; consumes the rextio
@@ -41,8 +57,9 @@ no-ops silently when it is absent).
 
 ### Positions and platforms
 
-- Contract columns (UTF-8 byte offsets; RXT000's 1-based character offset
-  special-cased) are converted to UTF-16 LSP positions via document text.
+- Contract columns (UTF-8 byte offsets; under contract 1.x, RXT000's 1-based
+  code-point offset special-cased) are converted to UTF-16 LSP positions via
+  document text.
 - File URIs are converted with pygls' own helpers (Windows drive letters and
   UNC paths included).
 - `**/rextio.toml` is watched (dynamic registration when the client supports

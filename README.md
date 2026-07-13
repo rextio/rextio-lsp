@@ -20,7 +20,7 @@ rextio-lsp registers **only** Rextio-semantic capabilities and stays out of ever
 - Severity is capped: rejection codes → Warning, informational codes (RXT075/080/090/091) → Hint, everything else → Information (never Error)
 - Hover on a function definition line shows its route, native status, and rejection guidance (from the capability manifest)
 - Acquisition prefers importing the project's own `rextio` in-process, falling back to a discovered `rextio` binary subprocess
-- Unsupported contract major → degraded (generic) diagnostics without guidance enrichment
+- Tooling-contract majors `{1, 2}` fully supported: major 2 maps every column as 0-based UTF-8 bytes; major 1 keeps legacy `RXT000` 1-based code-point mapping. Other majors → degraded (generic) diagnostics without guidance enrichment
 
 **M2**
 

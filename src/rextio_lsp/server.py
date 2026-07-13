@@ -40,9 +40,11 @@ from rextio_lsp.contract import (
     DiagnosticRecord,
     FunctionReport,
     ProjectReport,
+    codepoint_character,
     is_contract_supported,
     lsp_character,
     lsp_line,
+    uses_legacy_rxt000_columns,
     utf16_character,
     utf16_len,
 )
@@ -141,14 +143,23 @@ def map_severity(code: str, *, is_rejection: bool) -> lsp.DiagnosticSeverity:
     return lsp.DiagnosticSeverity.Information
 
 
-def _character_at(lines: list[str] | None, contract_line: int, column: int) -> int:
-    """LSP character for a contract (1-based line, UTF-8 byte ``column``).
+def _character_at(
+    lines: list[str] | None,
+    contract_line: int,
+    column: int,
+    *,
+    code: str = "",
+    contract_version: str = "",
+) -> int:
+    """LSP character for a contract column under the report's contract version.
 
-    Every diagnostic code (including ``RXT000``) uses the same contract: columns
-    are 0-based UTF-8 byte offsets. LSP positions default to UTF-16 code units.
-    When the document's line text is available, convert the byte offset
-    accurately (see :func:`utf16_character`); otherwise fall back to the raw
-    byte offset (:func:`lsp_character`).
+    Default (contract major 2, and non-``RXT000`` on any supported major):
+    ``column`` is a 0-based UTF-8 byte offset → UTF-16 via
+    :func:`utf16_character` (or :func:`lsp_character` without line text).
+
+    Legacy (contract major 1 + code ``RXT000`` only): ``column`` is CPython's
+    1-based Unicode code-point ``SyntaxError.offset`` → UTF-16 via
+    :func:`codepoint_character` (or subtract-1 without line text).
     """
     # Defensive: the parse now coerces a null/junk column to 0 (see
     # contract._int_or), but guard here too so a None never reaches the mapping.
@@ -159,6 +170,10 @@ def _character_at(lines: list[str] | None, contract_line: int, column: int) -> i
         idx = lsp_line(contract_line)
         if 0 <= idx < len(lines):
             line_text = lines[idx]
+    if code == "RXT000" and uses_legacy_rxt000_columns(contract_version):
+        if line_text is not None:
+            return codepoint_character(line_text, column)
+        return max(column - 1, 0)
     if line_text is not None:
         return utf16_character(line_text, column)
     return lsp_character(column)
@@ -170,6 +185,7 @@ def to_lsp_diagnostic(
     is_rejection: bool,
     degraded: bool,
     lines: list[str] | None = None,
+    contract_version: str = "",
 ) -> lsp.Diagnostic:
     """Convert a contract diagnostic to an LSP diagnostic.
 
@@ -177,17 +193,30 @@ def to_lsp_diagnostic(
     analyzer message with no guidance enrichment; otherwise the analyzer's
     single-sourced ``suggestion`` (the same string the capability manifest
     carries) is appended. ``lines`` (the document's text split into lines) lets
-    the range's columns be mapped from UTF-8 byte offsets to UTF-16 code units.
+    the range's columns be mapped from contract units to UTF-16 code units.
+    ``contract_version`` selects legacy vs standardized ``RXT000`` mapping.
     """
     start = lsp.Position(
         line=lsp_line(record.line),
-        character=_character_at(lines, record.line, record.column),
+        character=_character_at(
+            lines,
+            record.line,
+            record.column,
+            code=record.code,
+            contract_version=contract_version,
+        ),
     )
     # Use the real span when the record carries one; else a zero-width range.
     if record.end_line is not None and record.end_column is not None:
         end = lsp.Position(
             line=lsp_line(record.end_line),
-            character=_character_at(lines, record.end_line, record.end_column),
+            character=_character_at(
+                lines,
+                record.end_line,
+                record.end_column,
+                code=record.code,
+                contract_version=contract_version,
+            ),
         )
     else:
         end = start
@@ -218,9 +247,12 @@ def diagnostics_for_file(
     records are de-duplicated against per-function diagnostics on
     ``(code, line, column, message)`` -- the message is part of the key so two
     distinct diagnostics that share a code and position are not collapsed.
+    ``report.contract_version`` drives legacy vs standardized ``RXT000`` column
+    mapping.
     """
     diagnostics: list[lsp.Diagnostic] = []
     covered: set[tuple[str, int, int, str]] = set()
+    version = report.contract_version
     for fn in report.functions_in_file(file_path):
         rejection_codes = set(fn.rejection_codes)
         for record in fn.diagnostics:
@@ -228,7 +260,11 @@ def diagnostics_for_file(
             covered.add((record.code, record.line, record.column, record.message))
             diagnostics.append(
                 to_lsp_diagnostic(
-                    record, is_rejection=is_rejection, degraded=degraded, lines=lines
+                    record,
+                    is_rejection=is_rejection,
+                    degraded=degraded,
+                    lines=lines,
+                    contract_version=version,
                 )
             )
     for record in report.top_level_diagnostics:
@@ -241,7 +277,13 @@ def diagnostics_for_file(
         # Top-level records are module/parse-level notes, never function
         # rejections, so they map by code (Information/Hint), never Warning.
         diagnostics.append(
-            to_lsp_diagnostic(record, is_rejection=False, degraded=degraded, lines=lines)
+            to_lsp_diagnostic(
+                record,
+                is_rejection=False,
+                degraded=degraded,
+                lines=lines,
+                contract_version=version,
+            )
         )
     return diagnostics
 
@@ -255,7 +297,12 @@ def project_scope_diagnostics(
     to attach them to). Never rejections, so mapped by code.
     """
     return [
-        to_lsp_diagnostic(record, is_rejection=False, degraded=degraded)
+        to_lsp_diagnostic(
+            record,
+            is_rejection=False,
+            degraded=degraded,
+            contract_version=report.contract_version,
+        )
         for record in report.top_level_diagnostics
         if not record.file_path
     ]
@@ -324,9 +371,17 @@ def code_lenses_for(
     :data:`ROUTE_INFO_COMMAND` carrying ``[qualname]`` as its argument.
     """
     lenses: list[lsp.CodeLens] = []
+    # Function definition columns are always 0-based UTF-8 (ast.col_offset),
+    # never the legacy RXT000 code-point special case.
     for fn in report.functions_in_file(file_path):
         position = lsp.Position(
-            line=lsp_line(fn.line), character=_character_at(lines, fn.line, fn.column)
+            line=lsp_line(fn.line),
+            character=_character_at(
+                lines,
+                fn.line,
+                fn.column,
+                contract_version=report.contract_version,
+            ),
         )
         lenses.append(
             lsp.CodeLens(

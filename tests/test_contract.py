@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from rextio_lsp.contract import (
     INFORMATIONAL_CODES,
+    SUPPORTED_CONTRACT_MAJORS,
     CapabilityManifest,
+    codepoint_character,
     is_contract_supported,
     lsp_character,
     lsp_line,
     parse_capabilities,
     parse_check_report,
     parse_major,
+    uses_legacy_rxt000_columns,
     utf16_character,
     utf16_len,
 )
@@ -18,7 +21,8 @@ from rextio_lsp.contract import (
 
 def test_parse_check_report_flattens_functions(check_boundary):
     report = parse_check_report(check_boundary)
-    assert report.contract_version == "1.0.0"
+    assert report.contract_version in {"1.0.0", "2.0.0"}
+    assert parse_major(report.contract_version) in SUPPORTED_CONTRACT_MAJORS
     qualnames = {fn.qualname for fn in report.functions}
     assert "boundary_demo.pipeline.compute_rejected" in qualnames
     assert "boundary_demo.pipeline.square" in qualnames
@@ -73,15 +77,30 @@ def test_parse_major():
 
 
 def test_contract_version_gate():
+    # Dual-map server: majors 1 (legacy RXT000) and 2 (standardized) are supported.
+    assert SUPPORTED_CONTRACT_MAJORS == frozenset({1, 2})
     assert is_contract_supported("1.0.0") is True
     assert is_contract_supported("1.9.9") is True
-    assert is_contract_supported("2.0.0") is False
+    assert is_contract_supported("2.0.0") is True
+    assert is_contract_supported("2.1.0") is True
+    # Major 3+ and junk are unsupported so old "silent accept" cannot recur.
+    assert is_contract_supported("3.0.0") is False
     assert is_contract_supported(None) is False
+    assert is_contract_supported("") is False
+
+
+def test_uses_legacy_rxt000_columns_only_for_major_1():
+    assert uses_legacy_rxt000_columns("1.0.0") is True
+    assert uses_legacy_rxt000_columns("1.9.9") is True
+    assert uses_legacy_rxt000_columns("2.0.0") is False
+    assert uses_legacy_rxt000_columns("2.1.0") is False
+    assert uses_legacy_rxt000_columns(None) is False
+    assert uses_legacy_rxt000_columns("weird") is False
 
 
 def test_parse_capabilities_and_guidance_lookup(capabilities_boundary):
     manifest = parse_capabilities(capabilities_boundary)
-    assert manifest.contract_version == "1.0.0"
+    assert parse_major(manifest.contract_version) in SUPPORTED_CONTRACT_MAJORS
     assert manifest.config_fingerprint
     assert manifest.rules
 
@@ -214,6 +233,16 @@ def test_utf16_character_offset_inside_multibyte_sequence():
     line = "한글"  # 6 UTF-8 bytes, 2 UTF-16 units
     assert utf16_character(line, 1) == 0  # inside the first 3-byte sequence
     assert utf16_character(line, 3) == 1  # exactly after the first char
+
+
+def test_codepoint_character_legacy_rxt000_mapping():
+    # Legacy major-1 RXT000: 1-based code points → UTF-16 units.
+    line = 'x = "한글😀" + ('
+    # SyntaxError.offset 13 (1-based) points at '('; UTF-16 index of '(' is 13.
+    assert codepoint_character(line, 13) == 13
+    # Astral: 𝐀 is one code point / two UTF-16 units.
+    astral = "𝐀 = ("
+    assert codepoint_character(astral, 5) == 5  # 1-based points at '('
 
 
 # --------------------------------------------------------------------------- #

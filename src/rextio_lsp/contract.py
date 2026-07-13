@@ -14,8 +14,11 @@ Two JSON surfaces are parsed:
   records used for guidance lookup).
 
 Positions in the contract follow Python's ``ast`` conventions: ``line`` is
-1-based, ``column`` is a 0-based ``col_offset``. LSP positions are fully 0-based,
-so line is decremented and column passed through (see :func:`lsp_line`).
+1-based. Under contract major 2, every ``column`` (including ``RXT000``) is a
+0-based UTF-8 byte offset (``ast.col_offset``). Contract major 1 left
+``RXT000.column`` as CPython's 1-based Unicode code-point
+``SyntaxError.offset``; see :func:`uses_legacy_rxt000_columns`. LSP positions
+are fully 0-based UTF-16 code units.
 """
 
 from __future__ import annotations
@@ -23,10 +26,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-# The contract major version this server understands. A check/capabilities
-# payload whose top-level ``contract_version`` has a different major triggers
-# degraded (generic) diagnostics -- see :func:`is_contract_supported`.
-SUPPORTED_CONTRACT_MAJOR = 1
+# Contract majors this server fully understands. Major 1 = legacy RXT000
+# code-point columns; major 2 = standardized UTF-8 byte columns for every
+# diagnostic. A check/capabilities payload whose major is outside this set
+# triggers degraded (generic) diagnostics -- see :func:`is_contract_supported`.
+# A frozenset (not a single int) is required so a major-1-only gate cannot
+# silently accept a 2.x producer and mis-map RXT000, and so this server can
+# still map both producers correctly.
+SUPPORTED_CONTRACT_MAJORS: frozenset[int] = frozenset({1, 2})
+
+# Back-compat alias for callers/tests that still import the singular name.
+# Equals the highest supported major; prefer :data:`SUPPORTED_CONTRACT_MAJORS`.
+SUPPORTED_CONTRACT_MAJOR = 2
 
 # Codes that are informational notes/hints rather than promotion blockers. They
 # map to a low LSP severity regardless of the rextio-side severity string. Kept
@@ -59,12 +70,13 @@ def utf16_len(text: str) -> int:
 def utf16_character(line_text: str, byte_offset: int) -> int:
     """Map a UTF-8 byte offset within ``line_text`` to a UTF-16 code unit index.
 
-    Contract columns are ``ast.col_offset`` values: 0-based offsets into the
-    line's UTF-8 *bytes*. LSP positions default to UTF-16 code units, so a line
-    with multi-byte characters (e.g. ``x = "한글" + f(1)``, where ``f`` is byte
-    15 but UTF-16 index 11) needs conversion. Decode the byte prefix, then sum
-    its UTF-16 code-unit lengths. A ``byte_offset`` landing inside a multi-byte
-    sequence decodes the largest valid prefix.
+    Contract columns (major 2, and non-RXT000 on major 1) are ``ast.col_offset``
+    values: 0-based offsets into the line's UTF-8 *bytes*. LSP positions default
+    to UTF-16 code units, so a line with multi-byte characters (e.g.
+    ``x = "한글" + f(1)``, where ``f`` is byte 15 but UTF-16 index 11) needs
+    conversion. Decode the byte prefix, then sum its UTF-16 code-unit lengths.
+    A ``byte_offset`` landing inside a multi-byte sequence decodes the largest
+    valid prefix.
     """
     if byte_offset <= 0:
         return 0
@@ -74,6 +86,27 @@ def utf16_character(line_text: str, byte_offset: int) -> int:
     except UnicodeDecodeError:
         decoded = prefix.decode("utf-8", errors="ignore")
     return utf16_len(decoded)
+
+
+def codepoint_character(line_text: str, one_based_codepoint: int) -> int:
+    """Map a 1-based Unicode code-point index to a 0-based UTF-16 unit index.
+
+    Used only for **legacy contract major 1** ``RXT000`` columns
+    (CPython ``SyntaxError.offset``). Subtract 1, clamp, then sum UTF-16
+    code-unit lengths of the code-point prefix.
+    """
+    col0 = max(one_based_codepoint - 1, 0)
+    return utf16_len(line_text[:col0])
+
+
+def uses_legacy_rxt000_columns(contract_version: str | None) -> bool:
+    """Return whether ``RXT000`` columns are legacy 1-based code points.
+
+    Contract major 1 serialized ``RXT000.column`` as CPython's
+    ``SyntaxError.offset`` (1-based Unicode code points). Major 2+ uses the
+    same 0-based UTF-8 byte offsets as every other diagnostic.
+    """
+    return parse_major(contract_version) == 1
 
 
 @dataclass(frozen=True)
@@ -196,8 +229,15 @@ def parse_major(version: str | None) -> int | None:
 
 
 def is_contract_supported(version: str | None) -> bool:
-    """Return whether ``version``'s major equals the supported contract major."""
-    return parse_major(version) == SUPPORTED_CONTRACT_MAJOR
+    """Return whether ``version``'s major is in :data:`SUPPORTED_CONTRACT_MAJORS`.
+
+    Majors 1 and 2 are both fully supported; position mapping for ``RXT000``
+    branches on the major (see :func:`uses_legacy_rxt000_columns`). Any other
+    major (or unparseable version) is unsupported and triggers degraded
+    diagnostics.
+    """
+    major = parse_major(version)
+    return major is not None and major in SUPPORTED_CONTRACT_MAJORS
 
 
 def _optional_int(value: Any) -> int | None:

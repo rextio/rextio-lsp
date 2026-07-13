@@ -1,6 +1,6 @@
 {
   "config_fingerprint": "d7a0a2285b55b8eb2543fd8413f3312edf9be3373ae53b49a2017e7d26a11d8e",
-  "contract_version": "1.0.0",
+  "contract_version": "2.0.0",
   "plugins": [],
   "project_root": "/private/tmp/cap_probe2",
   "rextio_version": "0.1.1",

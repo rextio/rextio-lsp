@@ -510,8 +510,8 @@ def test_latency_log_thresholds():
 
 def test_analyze_project_records_last_duration(monkeypatch):
     server = RextioLanguageServer()
-    # a degraded report skips the capabilities warm-up; publish is stubbed out
-    report = parse_check_report({"contract_version": "2.0.0", "project_root": "/proj"})
+    # an unsupported-major report skips the capabilities warm-up; publish is stubbed out
+    report = parse_check_report({"contract_version": "3.0.0", "project_root": "/proj"})
     monkeypatch.setattr(server.engine, "check", lambda _root: report)
     monkeypatch.setattr(server, "_publish_for_project", lambda *a, **k: None)
     logs = []
@@ -844,7 +844,7 @@ def test_multi_root_publish_isolation(tmp_path, monkeypatch):
 def test_diagnostics_for_file_converts_byte_offset_to_utf16():
     module = "/p/m.py"
     line = 'x = "한글" + f(1)'  # `f` at UTF-8 byte 15, UTF-16 index 11
-    # 0-based UTF-8 byte column (same for every diagnostic code)
+    # Non-RXT000: 0-based UTF-8 byte column on every supported major.
     record = {
         "code": "RXT070",
         "message": "m",
@@ -853,18 +853,19 @@ def test_diagnostics_for_file_converts_byte_offset_to_utf16():
         "line": 1,
         "column": 15,
     }
-    report = parse_check_report({"contract_version": "1.0.0", "diagnostics": [record]})
-    # no lines -> raw byte offset fallback
-    assert diagnostics_for_file(report, module, degraded=False)[0].range.start.character == 15
-    # with the document line -> converted to the UTF-16 index
-    converted = diagnostics_for_file(report, module, degraded=False, lines=[line])
-    assert converted[0].range.start.character == 11
+    for version in ("1.0.0", "2.0.0"):
+        report = parse_check_report({"contract_version": version, "diagnostics": [record]})
+        # no lines -> raw byte offset fallback
+        assert diagnostics_for_file(report, module, degraded=False)[0].range.start.character == 15
+        # with the document line -> converted to the UTF-16 index
+        converted = diagnostics_for_file(report, module, degraded=False, lines=[line])
+        assert converted[0].range.start.character == 11
 
 
-def test_diagnostics_for_file_rxt000_column_is_utf8_byte_offset():
-    # RXT000 uses the same 0-based UTF-8 byte column as every other code.
-    # A non-BMP char (𝐀 = U+1D400, 4 UTF-8 bytes / 2 UTF-16 units) makes byte
-    # offset, code-point index, and UTF-16 index all diverge.
+def test_diagnostics_for_file_rxt000_contract2_is_utf8_byte_offset():
+    # Contract 2.x: RXT000 uses the same 0-based UTF-8 byte column as every
+    # other code. A non-BMP char (𝐀 = U+1D400, 4 UTF-8 bytes / 2 UTF-16 units)
+    # makes byte offset, code-point index, and UTF-16 index all diverge.
     module = "/p/m.py"
     line = "𝐀 = ("  # '(' at UTF-8 byte 7; prefix "𝐀 = " is 5 UTF-16 units
     record = {
@@ -875,7 +876,7 @@ def test_diagnostics_for_file_rxt000_column_is_utf8_byte_offset():
         "line": 1,
         "column": 7,  # 0-based UTF-8 byte offset of '('
     }
-    report = parse_check_report({"contract_version": "1.0.0", "diagnostics": [record]})
+    report = parse_check_report({"contract_version": "2.0.0", "diagnostics": [record]})
     # without line text: raw byte offset fallback
     assert diagnostics_for_file(report, module, degraded=False)[0].range.start.character == 7
     # with line text: byte 7 -> UTF-16 index 5 (𝐀 is a surrogate pair)
@@ -883,11 +884,32 @@ def test_diagnostics_for_file_rxt000_column_is_utf8_byte_offset():
     assert converted[0].range.start.character == 5
 
 
-def test_diagnostics_for_file_rxt000_ascii_line_placement():
-    # RXT000 on a plain ASCII line: 0-based byte column equals UTF-16 index.
+def test_diagnostics_for_file_rxt000_contract1_is_one_based_code_point():
+    # Contract 1.x legacy: RXT000.column is SyntaxError.offset (1-based code
+    # points). Same astral line: '(' is the 5th code point (1-based), UTF-16 5.
     module = "/p/m.py"
-    line = "def broken("  # '(' at 0-based byte/code-point index 10
+    line = "𝐀 = ("
     record = {
+        "code": "RXT000",
+        "message": "invalid syntax",
+        "severity": "error",
+        "file_path": module,
+        "line": 1,
+        "column": 5,  # 1-based code point pointing at '('
+    }
+    report = parse_check_report({"contract_version": "1.0.0", "diagnostics": [record]})
+    # without line text: subtract 1, pass through
+    assert diagnostics_for_file(report, module, degraded=False)[0].range.start.character == 4
+    # with line text: 4 code points -> 5 UTF-16 units (𝐀 is a surrogate pair)
+    converted = diagnostics_for_file(report, module, degraded=False, lines=[line])
+    assert converted[0].range.start.character == 5
+
+
+def test_diagnostics_for_file_rxt000_ascii_line_placement_both_contracts():
+    # ASCII: 0-based byte column for major 2; 1-based code point for major 1.
+    module = "/p/m.py"
+    line = "def broken("  # '(' at 0-based index 10
+    record2 = {
         "code": "RXT000",
         "message": "invalid syntax",
         "severity": "error",
@@ -895,17 +917,27 @@ def test_diagnostics_for_file_rxt000_ascii_line_placement():
         "line": 1,
         "column": 10,
     }
-    report = parse_check_report({"contract_version": "1.0.0", "diagnostics": [record]})
-    converted = diagnostics_for_file(report, module, degraded=False, lines=[line])
-    assert converted[0].range.start.character == 10
+    report2 = parse_check_report({"contract_version": "2.0.0", "diagnostics": [record2]})
+    assert (
+        diagnostics_for_file(report2, module, degraded=False, lines=[line])[0]
+        .range.start.character
+        == 10
+    )
+    record1 = {**record2, "column": 11}  # 1-based code point at '('
+    report1 = parse_check_report({"contract_version": "1.0.0", "diagnostics": [record1]})
+    assert (
+        diagnostics_for_file(report1, module, degraded=False, lines=[line])[0]
+        .range.start.character
+        == 10
+    )
 
 
-def test_diagnostics_for_file_rxt000_real_syntaxerror_offset_maps_to_utf16():
-    # Normalized core contract: RXT000.column is a 0-based UTF-8 byte offset
-    # derived from CPython SyntaxError.offset (1-based code point). Derive the
-    # core-style byte column from a real compile() SyntaxError on a line that
-    # has both BMP multibyte Korean and a non-BMP emoji *before* the error site
-    # so byte, code-point, and UTF-16 indices diverge. Stable on CPython 3.11–3.14.
+def test_cross_version_rxt000_maps_to_same_utf16_character():
+    """Smoke: legacy 1.x and new 2.x RXT000 columns land on the same UTF-16 char.
+
+    Real CPython SyntaxError on a line where code points, UTF-8 bytes, and
+    UTF-16 units all diverge (Korean BMP + astral emoji before the error site).
+    """
     module = "/p/m.py"
     source = 'x = "한글😀" + ('  # unclosed '(' after 한글 + 😀
     try:
@@ -920,10 +952,62 @@ def test_diagnostics_for_file_rxt000_real_syntaxerror_offset_maps_to_utf16():
     # CPython 3.11–3.14: offset 13 points at '(' (1-based code point).
     assert err.offset == 13
     assert line == source
-    # Core converts: prefix before the error site -> UTF-8 byte length.
+    prefix = line[: err.offset - 1]
+    utf8_column = len(prefix.encode("utf-8"))
+    assert utf8_column == 19
+    # Adversarial lock: three unit systems disagree on the numeric value.
+    assert len(prefix) == 12  # 0-based code points
+    assert utf8_column == 19
+    utf16_at_error = sum(2 if ord(ch) > 0xFFFF else 1 for ch in prefix)
+    assert utf16_at_error == 13
+    assert len({12, 19, 13}) == 3
+
+    base = {
+        "code": "RXT000",
+        "message": f"Python parse error: {err.msg}",
+        "severity": "error",
+        "file_path": module,
+        "line": err.lineno,
+    }
+    # Contract 1.x producer: raw SyntaxError.offset
+    legacy = parse_check_report(
+        {"contract_version": "1.0.0", "diagnostics": [{**base, "column": err.offset}]}
+    )
+    # Contract 2.x producer: 0-based UTF-8 byte offset
+    modern = parse_check_report(
+        {"contract_version": "2.0.0", "diagnostics": [{**base, "column": utf8_column}]}
+    )
+    legacy_char = diagnostics_for_file(legacy, module, degraded=False, lines=[line])[
+        0
+    ].range.start.character
+    modern_char = diagnostics_for_file(modern, module, degraded=False, lines=[line])[
+        0
+    ].range.start.character
+    assert legacy_char == modern_char == 13
+    # Without line text the fallbacks differ by unit system (still intentional).
+    assert diagnostics_for_file(legacy, module, degraded=False)[0].range.start.character == 12
+    assert diagnostics_for_file(modern, module, degraded=False)[0].range.start.character == 19
+
+
+def test_diagnostics_for_file_rxt000_real_syntaxerror_offset_maps_to_utf16():
+    # Normalized core contract 2.x: RXT000.column is a 0-based UTF-8 byte offset
+    # derived from CPython SyntaxError.offset (1-based code point).
+    module = "/p/m.py"
+    source = 'x = "한글😀" + ('  # unclosed '(' after 한글 + 😀
+    try:
+        compile(source, module, "exec")
+    except SyntaxError as exc:
+        err = exc  # keep after except (PEP 3110 clears the as-target)
+    else:
+        raise AssertionError(f"expected SyntaxError for {source!r}")
+    assert err.offset is not None
+    assert err.lineno == 1
+    line = (err.text or source).rstrip("\n")
+    assert err.offset == 13
+    assert line == source
     prefix = line[: err.offset - 1]
     core_column = len(prefix.encode("utf-8"))
-    assert core_column == 19  # lock: 한글 (6) + 😀 (4) + ASCII prefix/suffix
+    assert core_column == 19
     record = {
         "code": "RXT000",
         "message": f"Python parse error: {err.msg}",
@@ -932,11 +1016,9 @@ def test_diagnostics_for_file_rxt000_real_syntaxerror_offset_maps_to_utf16():
         "line": err.lineno,
         "column": core_column,
     }
-    report = parse_check_report({"contract_version": "1.0.0", "diagnostics": [record]})
-    # without line text: raw byte offset fallback
+    report = parse_check_report({"contract_version": "2.0.0", "diagnostics": [record]})
     bare = diagnostics_for_file(report, module, degraded=False)
     assert bare[0].range.start.character == 19
-    # with line text: byte 19 -> UTF-16 character 13 (😀 is a surrogate pair)
     converted = diagnostics_for_file(report, module, degraded=False, lines=[line])
     assert converted[0].range.start.character == 13
 

@@ -53,7 +53,7 @@ skip_without_rextio = pytest.mark.skipif(
 )
 
 
-TINY_MODULE = '''\
+TINY_MODULE = """\
 import rextio
 
 
@@ -70,7 +70,7 @@ def helper(xs: list[int]) -> int:
 @rextio.native
 def rejected(xs: list[int]) -> int:
     return helper(xs)
-'''
+"""
 
 TINY_TOML = """\
 [build]

@@ -40,9 +40,11 @@ from rextio_lsp.contract import (
     DiagnosticRecord,
     FunctionReport,
     ProjectReport,
+    codepoint_character,
     is_contract_supported,
     lsp_character,
     lsp_line,
+    uses_legacy_rxt000_columns,
     utf16_character,
     utf16_len,
 )
@@ -116,9 +118,7 @@ def latency_log(project_root: Path, elapsed: float) -> tuple[lsp.MessageType, st
     Info when the check exceeds :data:`LATENCY_WARN_SECONDS`, Log otherwise.
     """
     message = f"rextio check {project_root}: {elapsed:.2f}s"
-    msg_type = (
-        lsp.MessageType.Info if elapsed > LATENCY_WARN_SECONDS else lsp.MessageType.Log
-    )
+    msg_type = lsp.MessageType.Info if elapsed > LATENCY_WARN_SECONDS else lsp.MessageType.Log
     return msg_type, message
 
 
@@ -142,26 +142,25 @@ def map_severity(code: str, *, is_rejection: bool) -> lsp.DiagnosticSeverity:
 
 
 def _character_at(
-    lines: list[str] | None, contract_line: int, column: int, code: str = ""
+    lines: list[str] | None,
+    contract_line: int,
+    column: int,
+    *,
+    code: str = "",
+    contract_version: str = "",
 ) -> int:
-    """LSP character for a contract (1-based line, UTF-8 byte ``column``).
+    """LSP character for a contract column under the report's contract version.
 
-    Contract columns are UTF-8 byte offsets; LSP positions default to UTF-16
-    code units. When the document's line text is available, convert the byte
-    offset accurately (see :func:`utf16_character`); otherwise fall back to the
-    raw byte offset (:func:`lsp_character`).
+    Default (contract major 2, and non-``RXT000`` on any supported major):
+    ``column`` is a 0-based UTF-8 byte offset → UTF-16 via
+    :func:`utf16_character` (or :func:`lsp_character` without line text).
 
-    ``RXT000`` (syntax error) is a documented exception: core emits its column
-    as ``SyntaxError.offset`` -- a **1-based CODE POINT** offset -- not the
-    0-based UTF-8 byte offset every other diagnostic uses. It is special-cased
-    here (subtract 1, clamp, then map code points -> UTF-16 via the line text;
-    without line text, subtract 1 and pass through). This is a core contract
-    inconsistency to be normalized upstream in a future core release; until
-    then the server compensates so RXT000 lands correctly on non-ASCII lines.
+    Legacy (contract major 1 + code ``RXT000`` only): ``column`` is CPython's
+    1-based Unicode code-point ``SyntaxError.offset`` → UTF-16 via
+    :func:`codepoint_character` (or subtract-1 without line text).
     """
     # Defensive: the parse now coerces a null/junk column to 0 (see
-    # contract._int_or), but guard here too so a None can never reach the
-    # arithmetic below (int(None) - 1 would raise).
+    # contract._int_or), but guard here too so a None never reaches the mapping.
     if column is None:
         column = 0
     line_text: str | None = None
@@ -169,11 +168,10 @@ def _character_at(
         idx = lsp_line(contract_line)
         if 0 <= idx < len(lines):
             line_text = lines[idx]
-    if code == "RXT000":
-        col0 = max(column - 1, 0)
+    if code == "RXT000" and uses_legacy_rxt000_columns(contract_version):
         if line_text is not None:
-            return utf16_len(line_text[:col0])
-        return col0
+            return codepoint_character(line_text, column)
+        return max(column - 1, 0)
     if line_text is not None:
         return utf16_character(line_text, column)
     return lsp_character(column)
@@ -185,6 +183,7 @@ def to_lsp_diagnostic(
     is_rejection: bool,
     degraded: bool,
     lines: list[str] | None = None,
+    contract_version: str = "",
 ) -> lsp.Diagnostic:
     """Convert a contract diagnostic to an LSP diagnostic.
 
@@ -192,18 +191,29 @@ def to_lsp_diagnostic(
     analyzer message with no guidance enrichment; otherwise the analyzer's
     single-sourced ``suggestion`` (the same string the capability manifest
     carries) is appended. ``lines`` (the document's text split into lines) lets
-    the range's columns be mapped from UTF-8 byte offsets to UTF-16 code units.
+    the range's columns be mapped from contract units to UTF-16 code units.
+    ``contract_version`` selects legacy vs standardized ``RXT000`` mapping.
     """
     start = lsp.Position(
         line=lsp_line(record.line),
-        character=_character_at(lines, record.line, record.column, record.code),
+        character=_character_at(
+            lines,
+            record.line,
+            record.column,
+            code=record.code,
+            contract_version=contract_version,
+        ),
     )
     # Use the real span when the record carries one; else a zero-width range.
     if record.end_line is not None and record.end_column is not None:
         end = lsp.Position(
             line=lsp_line(record.end_line),
             character=_character_at(
-                lines, record.end_line, record.end_column, record.code
+                lines,
+                record.end_line,
+                record.end_column,
+                code=record.code,
+                contract_version=contract_version,
             ),
         )
     else:
@@ -235,9 +245,12 @@ def diagnostics_for_file(
     records are de-duplicated against per-function diagnostics on
     ``(code, line, column, message)`` -- the message is part of the key so two
     distinct diagnostics that share a code and position are not collapsed.
+    ``report.contract_version`` drives legacy vs standardized ``RXT000`` column
+    mapping.
     """
     diagnostics: list[lsp.Diagnostic] = []
     covered: set[tuple[str, int, int, str]] = set()
+    version = report.contract_version
     for fn in report.functions_in_file(file_path):
         rejection_codes = set(fn.rejection_codes)
         for record in fn.diagnostics:
@@ -245,7 +258,11 @@ def diagnostics_for_file(
             covered.add((record.code, record.line, record.column, record.message))
             diagnostics.append(
                 to_lsp_diagnostic(
-                    record, is_rejection=is_rejection, degraded=degraded, lines=lines
+                    record,
+                    is_rejection=is_rejection,
+                    degraded=degraded,
+                    lines=lines,
+                    contract_version=version,
                 )
             )
     for record in report.top_level_diagnostics:
@@ -258,29 +275,36 @@ def diagnostics_for_file(
         # Top-level records are module/parse-level notes, never function
         # rejections, so they map by code (Information/Hint), never Warning.
         diagnostics.append(
-            to_lsp_diagnostic(record, is_rejection=False, degraded=degraded, lines=lines)
+            to_lsp_diagnostic(
+                record,
+                is_rejection=False,
+                degraded=degraded,
+                lines=lines,
+                contract_version=version,
+            )
         )
     return diagnostics
 
 
-def project_scope_diagnostics(
-    report: ProjectReport, *, degraded: bool
-) -> list[lsp.Diagnostic]:
+def project_scope_diagnostics(report: ProjectReport, *, degraded: bool) -> list[lsp.Diagnostic]:
     """Top-level diagnostics with no ``file_path`` (project-scope).
 
     Published against the project's ``rextio.toml`` URI (there is no source file
     to attach them to). Never rejections, so mapped by code.
     """
     return [
-        to_lsp_diagnostic(record, is_rejection=False, degraded=degraded)
+        to_lsp_diagnostic(
+            record,
+            is_rejection=False,
+            degraded=degraded,
+            contract_version=report.contract_version,
+        )
         for record in report.top_level_diagnostics
         if not record.file_path
     ]
 
 
-def function_at_line(
-    report: ProjectReport, file_path: str, line: int
-) -> FunctionReport | None:
+def function_at_line(report: ProjectReport, file_path: str, line: int) -> FunctionReport | None:
     """Return the function whose definition is on 0-based LSP ``line``."""
     for fn in report.functions_in_file(file_path):
         if lsp_line(fn.line) == line:
@@ -288,9 +312,7 @@ def function_at_line(
     return None
 
 
-def _guidance_line(
-    code: str, manifest: CapabilityManifest | None, *, degraded: bool
-) -> str:
+def _guidance_line(code: str, manifest: CapabilityManifest | None, *, degraded: bool) -> str:
     """Render one ``- `CODE` — guidance`` bullet, guidance from the manifest."""
     guidance = None
     if not degraded and manifest is not None:
@@ -341,9 +363,17 @@ def code_lenses_for(
     :data:`ROUTE_INFO_COMMAND` carrying ``[qualname]`` as its argument.
     """
     lenses: list[lsp.CodeLens] = []
+    # Function definition columns are always 0-based UTF-8 (ast.col_offset),
+    # never the legacy RXT000 code-point special case.
     for fn in report.functions_in_file(file_path):
         position = lsp.Position(
-            line=lsp_line(fn.line), character=_character_at(lines, fn.line, fn.column)
+            line=lsp_line(fn.line),
+            character=_character_at(
+                lines,
+                fn.line,
+                fn.column,
+                contract_version=report.contract_version,
+            ),
         )
         lenses.append(
             lsp.CodeLens(
@@ -564,12 +594,8 @@ def code_actions_for(
         # preserved.
         edit = lsp.TextEdit(
             range=lsp.Range(
-                start=lsp.Position(
-                    line=dec_idx, character=utf16_len(original[:start_char])
-                ),
-                end=lsp.Position(
-                    line=dec_idx, character=utf16_len(original[:end_char])
-                ),
+                start=lsp.Position(line=dec_idx, character=utf16_len(original[:start_char])),
+                end=lsp.Position(line=dec_idx, character=utf16_len(original[:end_char])),
             ),
             new_text="@rextio.exempt",
         )
@@ -676,9 +702,7 @@ class RextioLanguageServer(LanguageServer):
                             method=lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES,
                             register_options=lsp.DidChangeWatchedFilesRegistrationOptions(
                                 watchers=[
-                                    lsp.FileSystemWatcher(
-                                        glob_pattern=f"**/{CONFIG_FILENAME}"
-                                    )
+                                    lsp.FileSystemWatcher(glob_pattern=f"**/{CONFIG_FILENAME}")
                                 ]
                             ),
                         )
@@ -942,9 +966,7 @@ class RextioLanguageServer(LanguageServer):
         degraded = self._degraded.get(str(root), False)
         manifest = None if degraded else self.engine.capabilities(root)
         markdown = build_hover_markdown(fn, manifest, degraded=degraded)
-        return lsp.Hover(
-            contents=lsp.MarkupContent(kind=lsp.MarkupKind.Markdown, value=markdown)
-        )
+        return lsp.Hover(contents=lsp.MarkupContent(kind=lsp.MarkupKind.Markdown, value=markdown))
 
     # -- latency ------------------------------------------------------------ #
     def _record_check_duration(self, project_root: Path, elapsed: float) -> None:
@@ -984,9 +1006,7 @@ class RextioLanguageServer(LanguageServer):
             context_diagnostics=list(params.context.diagnostics),
         )
 
-    def _report_and_path_for_uri(
-        self, uri: str
-    ) -> tuple[ProjectReport, Path] | None:
+    def _report_and_path_for_uri(self, uri: str) -> tuple[ProjectReport, Path] | None:
         """Resolve ``uri`` to (cached-or-fresh report, resolved path) or ``None``."""
         path = uri_to_path(uri)
         if path is None:
@@ -1004,9 +1024,7 @@ class RextioLanguageServer(LanguageServer):
         return report, resolved
 
     # -- rextio.toml watch -------------------------------------------------- #
-    def handle_watched_files_change(
-        self, params: lsp.DidChangeWatchedFilesParams
-    ) -> None:
+    def handle_watched_files_change(self, params: lsp.DidChangeWatchedFilesParams) -> None:
         """On a ``rextio.toml`` change, drop its cache entry and re-analyze.
 
         A deletion instead clears the project entirely: its manifest cache is
@@ -1074,9 +1092,7 @@ def create_server() -> RextioLanguageServer:
         return ls.hover_for(params.text_document.uri, params.position)
 
     @server.feature(lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES)
-    def _watched(
-        ls: RextioLanguageServer, params: lsp.DidChangeWatchedFilesParams
-    ) -> None:
+    def _watched(ls: RextioLanguageServer, params: lsp.DidChangeWatchedFilesParams) -> None:
         ls.handle_watched_files_change(params)
 
     return server

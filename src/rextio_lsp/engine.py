@@ -84,7 +84,9 @@ def _run_in_process(argv: list[str]) -> dict[str, Any]:
             raise AcquisitionError(f"rextio main raised SystemExit({exc.code})") from exc
     payload = out.getvalue().strip()
     if not payload:
-        raise AcquisitionError(f"rextio {argv[0]} produced no JSON (stderr: {err.getvalue().strip()})")
+        raise AcquisitionError(
+            f"rextio {argv[0]} produced no JSON (stderr: {err.getvalue().strip()})"
+        )
     try:
         parsed = json.loads(payload)
     except json.JSONDecodeError as exc:
@@ -259,7 +261,9 @@ class Engine:
             return None
         return parse_check_report(data)
 
-    def capabilities(self, project_root: Path, *, refresh: bool = False) -> CapabilityManifest | None:
+    def capabilities(
+        self, project_root: Path, *, refresh: bool = False
+    ) -> CapabilityManifest | None:
         """Return the capability manifest for ``project_root``.
 
         Cached per composite cache key (config fingerprint + rextio version +

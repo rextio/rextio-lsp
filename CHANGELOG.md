@@ -1,9 +1,9 @@
 # Changelog
 
-## 0.1.2 — Unreleased
+## 0.1.2 — 2026-07-18
 
-Source candidate `0.1.2`; it has not been tagged or uploaded. PyPI continues
-to serve `rextio-lsp` **0.1.1** until the release train is approved.
+Package version `0.1.2`. This release adds the tooling-contract 2.2 promotion-
+assessment consumer surface while preserving legacy contract behavior.
 
 ### Added
 
@@ -23,12 +23,14 @@ to serve `rextio-lsp` **0.1.1** until the release train is approved.
 - Keep assessment blockers out of LSP Error severity while retaining improvement suggestions.
 - De-duplicate matching legacy and assessment diagnostics without hiding unrelated diagnostics.
 - Tolerate malformed marker, assessment, and range additions without dropping legacy reports.
+- No-op cleanly when the optional `rextio` core is absent instead of failing package discovery.
+- Withhold quick fixes on Python 3.11 tokenizer `ERRORTOKEN`s instead of risking malformed edits.
 
-### Eventual release order
+### Required release order
 
-Release `rextio-lsp` **0.1.2** before core `rextio` **0.1.4**, which will
-produce tooling-contract **2.2.0**. No tag or package upload is part of this
-source-candidate preparation.
+Release Train B deploys `rextio-lsp` **0.1.2** before core `rextio` **0.1.4**:
+the tolerant LSP consumer is released first, and the tooling-contract **2.2.0**
+producer follows. Core must not ship before or simultaneously with this LSP.
 
 ## 0.1.1 — 2026-07-14
 

@@ -4,13 +4,12 @@
 
 A Python (pygls) LSP server that consumes Rextio’s tooling-contract JSON and reports per-function execution routes (`native-direct`, `native-plugin:<id>`, `native-shim`, `fallback-python`, `fallback-accelerated:numba`, `rejected:<RXT>`) with actionable promotion guidance.
 
-## Status: 0.1.2 source candidate
+## Status: 0.1.2
 
-This source tree identifies as `rextio-lsp` **0.1.2**, an unreleased candidate.
-It has not been tagged or uploaded; `pip install rextio-lsp` continues to
-install the current PyPI release, **0.1.1** (2026-07-14).
+This is package version `rextio-lsp` **0.1.2**, released on 2026-07-18. It
+supersedes **0.1.1** (2026-07-14).
 
-### What the 0.1.2 candidate adds
+### What 0.1.2 adds
 
 - Reports automatic promotion eligibility for undecorated functions instead of requiring `@rextio.native` for editor feedback.
 - Preserves failed automatic-probe blockers, advisories, and suggestions as non-Error LSP diagnostics.
@@ -25,15 +24,14 @@ and unsupported majors degrade to generic diagnostics.
 
 `rextio` is **not** a package dependency of this server. The server acquires the tooling-contract JSON via **in-process** import or a **discovered subprocess** (see Features), choosing order from the configured interpreter and environment match, and no-ops silently when Rextio is absent.
 
-### Eventual safe deployment order
+### Required deployment order
 
-When this release train is approved, publish in this **strict** order:
+Release Train B uses this **strict** order:
 
-1. **`rextio-lsp` 0.1.2** — release the tolerant consumer first.
-2. **core `rextio` 0.1.4** — then release the tooling-contract 2.2 producer.
+1. **`rextio-lsp` 0.1.2** — the tolerant consumer is released first.
+2. **core `rextio` 0.1.4** — the tooling-contract 2.2 producer follows.
 
 Do not release core 0.1.4 before or simultaneously with the LSP consumer.
-This repository is only release-prepared at present; no tag or upload is implied.
 
 See the [CHANGELOG](https://github.com/rextio/rextio-lsp/blob/main/CHANGELOG.md) for the full release notes and the preserved 0.1.0 history.
 
@@ -65,7 +63,7 @@ rextio-lsp registers **only** Rextio-semantic capabilities and stays out of ever
 - Real diagnostic spans when the contract provides `end_line`/`end_column` (else a zero-width range)
 - Latency instrumentation: each whole-project check is logged via `window/logMessage` (Info when > 2.0s, else Log)
 
-**0.1.2 source candidate**
+**0.1.2**
 
 - Tooling-contract 2.2 promotion assessments cover undecorated eligible, ineligible, and structurally/policy-skipped functions.
 - Failed automatic probes retain their blocker/advisory messages and suggestions without becoming build errors or LSP Errors.
@@ -97,7 +95,7 @@ Install into the project environment so the server stays in version lock-step wi
 pip install rextio-lsp
 ```
 
-> **Note:** `pip install rextio-lsp` installs **0.1.1**, the current PyPI release. Version **0.1.2** exists only as an unreleased source candidate. To test it, install from a source checkout of this branch (see Development).
+> **Note:** `pip install rextio-lsp` installs **0.1.2**, the current PyPI release. To hack on the server itself, install from a source checkout (see Development).
 
 The server speaks LSP over stdio via the `rextio-lsp` console script (equivalently `python -m rextio_lsp`).
 
@@ -158,7 +156,7 @@ Contributor and agent guidance lives in the repository (`AGENTS.md`).
 
 | Component | Floor |
 |---|---|
-| Package version | Source candidate `0.1.2`; current PyPI release `0.1.1` |
+| Package version | `0.1.2` (see `__about__.__version__`) |
 | Python | `>= 3.11` |
 | pygls | `>= 2.1, < 3` |
 | Tooling-contract majors | `{1, 2}` supported; promotion assessments require `>=2.2.0,<3.0.0`; other majors → degraded |

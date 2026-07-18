@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import tokenize
 from pathlib import Path
 
 from lsprotocol import types as lsp
@@ -25,6 +26,7 @@ from rextio_lsp.server import (
     code_lenses_for,
     create_server,
     diagnostics_for_file,
+    _line_tokens,
     _native_exempt_span,
     find_native_decorator_line,
     function_at_line,
@@ -1559,6 +1561,17 @@ def test_code_action_withheld_for_unterminated_string_in_args():
         '@rextio.native(target="oops)\ndef rejected(xs: list[int]) -> int:\n    return helper(xs)\n'
     )
     assert _exempt_edit_apply(text) == []
+
+
+def test_line_tokens_rejects_errortoken_without_tokenizer_exception(monkeypatch):
+    """Python 3.11 reports an unterminated quote as a token, not an exception."""
+    tokens = [
+        tokenize.TokenInfo(tokenize.ERRORTOKEN, '"', (1, 22), (1, 23), 'target="oops)'),
+        tokenize.TokenInfo(tokenize.NAME, "oops", (1, 23), (1, 27), 'target="oops)'),
+        tokenize.TokenInfo(tokenize.OP, ")", (1, 27), (1, 28), 'target="oops)'),
+    ]
+    monkeypatch.setattr(tokenize, "generate_tokens", lambda _readline: iter(tokens))
+    assert _line_tokens('@rextio.native(target="oops)') is None
 
 
 # --------------------------------------------------------------------------- #

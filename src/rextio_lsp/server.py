@@ -634,19 +634,23 @@ def _line_tokens(line: str) -> list[tokenize.TokenInfo] | None:
     (nested parens, single quotes, single-line triple quotes): the tokenizer
     settles every string form for us instead of a hand-rolled quote scanner.
 
-    Any tokenizer failure -- ``TokenError`` from an unterminated string or an
-    unclosed bracket (a multi-line construct), ``IndentationError``, or anything
-    else -- means the line cannot be understood; return ``None`` so callers
-    WITHHOLD their action rather than guess a span and corrupt code.
+    Any tokenizer failure -- an ``ERRORTOKEN`` or exception such as
+    ``TokenError`` from an unterminated string/unclosed bracket -- means the line
+    cannot be understood; return ``None`` so callers WITHHOLD their action
+    rather than guess a span and corrupt code. Python 3.11 emits an
+    ``ERRORTOKEN`` for some unterminated strings where newer versions raise.
 
     tokenize reports token columns as 0-based code-point offsets into ``line`` --
     the very indices ``line[:col]`` uses elsewhere in this module -- so token
     columns need no conversion (verified against non-ASCII string content).
     """
     try:
-        return list(tokenize.generate_tokens(io.StringIO(line).readline))
+        tokens = list(tokenize.generate_tokens(io.StringIO(line).readline))
     except Exception:  # any tokenizer failure => unanalyzable => withhold
         return None
+    if any(tok.type == tokenize.ERRORTOKEN for tok in tokens):
+        return None
+    return tokens
 
 
 def _line_paren_delta(line: str) -> int:

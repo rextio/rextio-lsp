@@ -45,7 +45,10 @@ def check_syntax_error() -> dict[str, Any]:
     return load_fixture("check_syntax_error.json")
 
 
-rextio_available = importlib.util.find_spec("rextio.cli.main") is not None
+rextio_available = (
+    importlib.util.find_spec("rextio") is not None
+    and importlib.util.find_spec("rextio.cli.main") is not None
+)
 
 needs_rextio = pytest.mark.needs_rextio
 skip_without_rextio = pytest.mark.skipif(

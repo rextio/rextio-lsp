@@ -2,13 +2,62 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from rextio_lsp import engine
 
 CHECK_PAYLOAD = {"contract_version": "1.0.0", "project_root": "/p", "modules": []}
+
+
+def test_in_process_probe_short_circuits_when_rextio_parent_is_absent(monkeypatch):
+    """A missing optional parent package is normal, not an import failure."""
+    calls: list[str] = []
+
+    def find_spec(name):
+        calls.append(name)
+        if name == "rextio":
+            return None
+        raise AssertionError("child lookup must be short-circuited")
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    assert engine._rextio_available_in_process() is False
+    assert calls == ["rextio"]
+
+
+def test_conftest_loads_when_rextio_parent_package_is_absent():
+    """The real-core integration marker must resolve to a skip, not crash."""
+    conftest = Path(__file__).with_name("conftest.py")
+    script = f"""
+import runpy
+import sys
+import types
+
+pytest = types.ModuleType("pytest")
+pytest.fixture = lambda function: function
+
+class Mark:
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: object()
+
+pytest.mark = Mark()
+sys.modules["pytest"] = pytest
+
+namespace = runpy.run_path({str(conftest)!r})
+assert namespace["rextio_available"] is False
+"""
+    completed = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def _record_paths(monkeypatch, *, in_process_ok=True):

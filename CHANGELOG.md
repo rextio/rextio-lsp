@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.1.2 — Unreleased
+
+Source candidate `0.1.2`; it has not been tagged or uploaded. PyPI continues
+to serve `rextio-lsp` **0.1.1** until the release train is approved.
+
+### Added
+
+- Show automatic native-promotion eligibility for undecorated functions.
+- Preserve failed automatic probes as actionable Warning-level editor guidance.
+- Show assessment status with each route CodeLens, including readable skip reasons.
+- Use exact function-name ranges for hover and source ranges for CodeLens anchors.
+
+### Changed
+
+- Hide promotion hover, diagnostics, and CodeLens noise for proven `@rextio.exempt` functions.
+- Trust the additive assessment fields only for tooling-contract `>=2.2.0,<3.0.0`.
+- Keep contract 1.x, 2.0/2.1, malformed payloads, and unsupported majors on legacy behavior.
+
+### Fixed
+
+- Keep assessment blockers out of LSP Error severity while retaining improvement suggestions.
+- De-duplicate matching legacy and assessment diagnostics without hiding unrelated diagnostics.
+- Tolerate malformed marker, assessment, and range additions without dropping legacy reports.
+
+### Eventual release order
+
+Release `rextio-lsp` **0.1.2** before core `rextio` **0.1.4**, which will
+produce tooling-contract **2.2.0**. No tag or package upload is part of this
+source-candidate preparation.
+
 ## 0.1.1 — 2026-07-14
 
 Package version `0.1.1`. This release finalizes the dual-map work. It follows

@@ -13,6 +13,7 @@ from rextio_lsp.contract import (
     parse_capabilities,
     parse_check_report,
     parse_major,
+    supports_promotion_assessment,
     uses_legacy_rxt000_columns,
     utf16_character,
     utf16_len,
@@ -89,6 +90,20 @@ def test_contract_version_gate():
     assert is_contract_supported("3.0.0") is False
     assert is_contract_supported(None) is False
     assert is_contract_supported("") is False
+
+
+def test_promotion_assessment_version_gate_is_22_only():
+    assert supports_promotion_assessment("1.99.0") is False
+    assert supports_promotion_assessment("2.0.0") is False
+    assert supports_promotion_assessment("2.1.9") is False
+    assert supports_promotion_assessment("2.2.0") is True
+    assert supports_promotion_assessment("2.2.0-rc.1+build.7") is True
+    assert supports_promotion_assessment("2.9.0") is True
+    assert supports_promotion_assessment("3.0.0") is False
+    assert supports_promotion_assessment("2") is False
+    assert supports_promotion_assessment("2.2") is False
+    assert supports_promotion_assessment("2.2.future") is False
+    assert supports_promotion_assessment("2.future.0") is False
 
 
 def test_uses_legacy_rxt000_columns_only_for_major_1():
@@ -204,6 +219,216 @@ def test_parse_tolerates_junk_column_and_function_position():
     (diag,) = fn.diagnostics
     assert diag.column == 0  # junk column -> default 0
     assert diag.line == 3  # a valid position is preserved
+
+
+def _parse_22_function(**updates):
+    function = {
+        "qualname": "m.auto_bad",
+        "name": "auto_bad",
+        "file_path": "/proj/m.py",
+        "line": 8,
+        "column": 0,
+        "route": "fallback-python",
+        "native_status": "not-candidate",
+        "rejection_codes": [],
+        "diagnostics": [],
+        "marker_kind": "none",
+        "promotion_assessment": {
+            "status": "ineligible",
+            "provenance": "auto",
+            "diagnostic_codes": ["RXT001"],
+            "diagnostics": [
+                {
+                    "kind": "blocker",
+                    "code": "RXT001",
+                    "message": "native promotion requires resolved types",
+                    "suggestion": "Add supported type annotations.",
+                    "line": 8,
+                    "column": 0,
+                    "end_line": 8,
+                    "end_column": 12,
+                }
+            ],
+            "skip_reason": None,
+        },
+        "source_range": {
+            "start": {"line": 8, "column": 0},
+            "end": {"line": 9, "column": 12},
+        },
+        "name_range": {
+            "start": {"line": 8, "column": 4},
+            "end": {"line": 8, "column": 12},
+        },
+    }
+    function.update(updates)
+    report = parse_check_report(
+        {
+            "contract_version": "2.2.0",
+            "modules": [{"file_path": "/proj/m.py", "functions": [function]}],
+        }
+    )
+    return report.functions[0]
+
+
+def test_parse_contract_22_promotion_assessment_and_ranges():
+    fn = _parse_22_function()
+    assert fn.marker_kind == "none"
+    assert fn.source_range is not None
+    assert (fn.source_range.start.line, fn.source_range.start.column) == (8, 0)
+    assert (fn.source_range.end.line, fn.source_range.end.column) == (9, 12)
+    assert fn.name_range is not None
+    assert (fn.name_range.start.line, fn.name_range.start.column) == (8, 4)
+    assert (fn.name_range.end.line, fn.name_range.end.column) == (8, 12)
+
+    assessment = fn.promotion_assessment
+    assert assessment is not None
+    assert assessment.status == "ineligible"
+    assert assessment.provenance == "auto"
+    assert assessment.diagnostic_codes == ("RXT001",)
+    assert assessment.skip_reason is None
+    (diagnostic,) = assessment.diagnostics
+    assert diagnostic.kind == "blocker"
+    assert diagnostic.suggestion == "Add supported type annotations."
+    assert (diagnostic.line, diagnostic.column) == (8, 0)
+    assert (diagnostic.end_line, diagnostic.end_column) == (8, 12)
+
+
+def test_parse_contract_22_valid_skipped_assessment():
+    fn = _parse_22_function(
+        marker_kind="none",
+        promotion_assessment={
+            "status": "skipped",
+            "provenance": "structural-skip",
+            "diagnostic_codes": [],
+            "diagnostics": [],
+            "skip_reason": "method-auto-promotion-not-supported",
+        },
+    )
+    assert fn.promotion_assessment is not None
+    assert fn.promotion_assessment.status == "skipped"
+    assert fn.promotion_assessment.skip_reason == "method-auto-promotion-not-supported"
+
+
+def test_parse_contract_22_malformed_additions_degrade_to_legacy_defaults():
+    fn = _parse_22_function(
+        marker_kind="future-marker",
+        promotion_assessment={
+            "status": "future-status",
+            "provenance": "auto",
+            "diagnostic_codes": [],
+            "diagnostics": [],
+            "skip_reason": None,
+        },
+        source_range={
+            "start": {"line": 8, "column": 0},
+            "end": {"line": 8, "column": 0},
+        },
+        name_range={
+            "start": {"line": 8, "column": 4},
+            "end": {"line": 9, "column": 12},
+        },
+    )
+    assert fn.marker_kind == "none"
+    assert fn.promotion_assessment is None
+    assert fn.source_range is None
+    assert fn.name_range is None
+
+
+def test_parse_contract_22_unhashable_enum_values_never_crash():
+    fn = _parse_22_function(
+        marker_kind=["exempt"],
+        promotion_assessment={
+            "status": ["ineligible"],
+            "provenance": {"kind": "auto"},
+            "diagnostic_codes": [],
+            "diagnostics": [],
+            "skip_reason": None,
+        },
+    )
+    assert fn.marker_kind == "none"
+    assert fn.promotion_assessment is None
+
+
+def test_parse_contract_22_rejects_inconsistent_assessment_shape():
+    # A skipped reason/provenance mismatch and an unsorted/underived code list
+    # are malformed additive data, not grounds to discard the legacy record.
+    skipped = _parse_22_function(
+        promotion_assessment={
+            "status": "skipped",
+            "provenance": "policy-skip",
+            "diagnostic_codes": [],
+            "diagnostics": [],
+            "skip_reason": "external-accelerator",
+        }
+    )
+    assert skipped.promotion_assessment is None
+
+    codes = _parse_22_function(
+        promotion_assessment={
+            "status": "ineligible",
+            "provenance": "auto",
+            "diagnostic_codes": ["RXT999"],
+            "diagnostics": [
+                {
+                    "kind": "blocker",
+                    "code": "RXT001",
+                    "message": "blocked",
+                    "suggestion": None,
+                    "line": 8,
+                    "column": 0,
+                    "end_line": None,
+                    "end_column": None,
+                }
+            ],
+            "skip_reason": None,
+        }
+    )
+    assert codes.promotion_assessment is None
+
+    impossible_provenance = _parse_22_function(
+        promotion_assessment={
+            "status": "eligible",
+            "provenance": "explicit-exempt",
+            "diagnostic_codes": [],
+            "diagnostics": [],
+            "skip_reason": None,
+        }
+    )
+    assert impossible_provenance.promotion_assessment is None
+
+
+def test_parse_contract_22_cross_validates_function_and_source_ranges():
+    mismatch = _parse_22_function(
+        source_range={
+            "start": {"line": 8, "column": 1},
+            "end": {"line": 9, "column": 12},
+        }
+    )
+    assert mismatch.source_range is None
+    assert mismatch.name_range is None
+
+    outside_name = _parse_22_function(
+        column=4,
+        source_range={
+            "start": {"line": 8, "column": 4},
+            "end": {"line": 9, "column": 12},
+        },
+        name_range={
+            "start": {"line": 8, "column": 0},
+            "end": {"line": 8, "column": 3},
+        }
+    )
+    assert outside_name.source_range is not None
+    assert outside_name.name_range is None
+
+    wrong_definition_line = _parse_22_function(
+        name_range={
+            "start": {"line": 9, "column": 4},
+            "end": {"line": 9, "column": 12},
+        }
+    )
+    assert wrong_definition_line.source_range is not None
+    assert wrong_definition_line.name_range is None
 
 
 # --------------------------------------------------------------------------- #

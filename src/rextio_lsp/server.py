@@ -37,13 +37,16 @@ from rextio_lsp.__about__ import __version__
 from rextio_lsp.contract import (
     INFORMATIONAL_CODES,
     CapabilityManifest,
+    ContractRange,
     DiagnosticRecord,
     FunctionReport,
     ProjectReport,
+    PromotionDiagnostic,
     codepoint_character,
     is_contract_supported,
     lsp_character,
     lsp_line,
+    supports_promotion_assessment,
     uses_legacy_rxt000_columns,
     utf16_character,
     utf16_len,
@@ -230,32 +233,106 @@ def to_lsp_diagnostic(
     )
 
 
+def _diagnostic_key(
+    record: DiagnosticRecord | PromotionDiagnostic,
+) -> tuple[str, int, int, int | None, int | None, str]:
+    """Stable key shared by legacy and assessment diagnostic channels."""
+    return (
+        record.code,
+        record.line,
+        record.column,
+        record.end_line,
+        record.end_column,
+        record.message,
+    )
+
+
+def _manifest_guidance(code: str, manifest: CapabilityManifest | None) -> str | None:
+    """Return non-empty capability guidance for ``code``, when available."""
+    if manifest is None:
+        return None
+    rule = manifest.guidance_for(code)
+    if rule is None or not rule.guidance:
+        return None
+    return rule.guidance
+
+
+def to_lsp_assessment_diagnostic(
+    record: PromotionDiagnostic,
+    *,
+    manifest: CapabilityManifest | None = None,
+    lines: list[str] | None = None,
+    contract_version: str = "",
+) -> lsp.Diagnostic:
+    """Convert non-build promotion evidence to a standard LSP diagnostic.
+
+    Promotion blockers are warnings, advisories follow the established
+    informational-code policy, and neither can become an LSP Error. A producer
+    suggestion wins; capability guidance fills only a missing suggestion.
+    """
+    start = lsp.Position(
+        line=lsp_line(record.line),
+        character=_character_at(
+            lines,
+            record.line,
+            record.column,
+            code=record.code,
+            contract_version=contract_version,
+        ),
+    )
+    if record.end_line is not None and record.end_column is not None:
+        end = lsp.Position(
+            line=lsp_line(record.end_line),
+            character=_character_at(
+                lines,
+                record.end_line,
+                record.end_column,
+                code=record.code,
+                contract_version=contract_version,
+            ),
+        )
+    else:
+        end = start
+    guidance = record.suggestion or _manifest_guidance(record.code, manifest)
+    message = record.message if not guidance else f"{record.message}\n\n{guidance}"
+    return lsp.Diagnostic(
+        range=lsp.Range(start=start, end=end),
+        message=message,
+        severity=map_severity(record.code, is_rejection=record.kind == "blocker"),
+        code=record.code,
+        source="rextio",
+    )
+
+
 def diagnostics_for_file(
     report: ProjectReport,
     file_path: str,
     *,
     degraded: bool,
     lines: list[str] | None = None,
+    manifest: CapabilityManifest | None = None,
 ) -> list[lsp.Diagnostic]:
     """Build all LSP diagnostics for one file from a project report.
 
     Includes both per-function diagnostics and any top-level/module diagnostics
     (e.g. a syntax-error ``RXT000``) whose ``file_path`` matches -- these produce
     zero functions, so without them the file would publish nothing. Top-level
-    records are de-duplicated against per-function diagnostics on
-    ``(code, line, column, message)`` -- the message is part of the key so two
-    distinct diagnostics that share a code and position are not collapsed.
+    records and promotion-assessment evidence are de-duplicated on the frozen
+    six-field key ``(code, line, column, end_line, end_column, message)``. The
+    message and span remain part of the key so distinct diagnostics are not
+    collapsed. Exact exemptions suppress assessment diagnostics only; unrelated
+    legacy analyzer diagnostics remain visible.
     ``report.contract_version`` drives legacy vs standardized ``RXT000`` column
     mapping.
     """
     diagnostics: list[lsp.Diagnostic] = []
-    covered: set[tuple[str, int, int, str]] = set()
+    covered: set[tuple[str, int, int, int | None, int | None, str]] = set()
     version = report.contract_version
     for fn in report.functions_in_file(file_path):
         rejection_codes = set(fn.rejection_codes)
         for record in fn.diagnostics:
             is_rejection = fn.native_status == "rejected" and record.code in rejection_codes
-            covered.add((record.code, record.line, record.column, record.message))
+            covered.add(_diagnostic_key(record))
             diagnostics.append(
                 to_lsp_diagnostic(
                     record,
@@ -265,10 +342,30 @@ def diagnostics_for_file(
                     contract_version=version,
                 )
             )
+        assessment = fn.promotion_assessment
+        if (
+            not degraded
+            and supports_promotion_assessment(version)
+            and fn.marker_kind != "exempt"
+            and assessment is not None
+        ):
+            for assessment_record in assessment.diagnostics:
+                key = _diagnostic_key(assessment_record)
+                if key in covered:
+                    continue
+                covered.add(key)
+                diagnostics.append(
+                    to_lsp_assessment_diagnostic(
+                        assessment_record,
+                        manifest=manifest,
+                        lines=lines,
+                        contract_version=version,
+                    )
+                )
     for record in report.top_level_diagnostics:
         if record.file_path != file_path:
             continue
-        key = (record.code, record.line, record.column, record.message)
+        key = _diagnostic_key(record)
         if key in covered:
             continue
         covered.add(key)
@@ -304,9 +401,63 @@ def project_scope_diagnostics(report: ProjectReport, *, degraded: bool) -> list[
     ]
 
 
-def function_at_line(report: ProjectReport, file_path: str, line: int) -> FunctionReport | None:
-    """Return the function whose definition is on 0-based LSP ``line``."""
+def _contract_range_to_lsp(
+    source_range: ContractRange,
+    *,
+    lines: list[str] | None,
+    contract_version: str,
+) -> lsp.Range:
+    """Map a validated contract-2 range to an LSP UTF-16 range."""
+    start = lsp.Position(
+        line=lsp_line(source_range.start.line),
+        character=_character_at(
+            lines,
+            source_range.start.line,
+            source_range.start.column,
+            contract_version=contract_version,
+        ),
+    )
+    end = lsp.Position(
+        line=lsp_line(source_range.end.line),
+        character=_character_at(
+            lines,
+            source_range.end.line,
+            source_range.end.column,
+            contract_version=contract_version,
+        ),
+    )
+    return lsp.Range(start=start, end=end)
+
+
+def function_at_line(
+    report: ProjectReport,
+    file_path: str,
+    line: int,
+    *,
+    character: int | None = None,
+    lines: list[str] | None = None,
+) -> FunctionReport | None:
+    """Return the function under an LSP position or on a legacy def line.
+
+    Contract-2.2 records use their exact ``name_range`` when a character is
+    supplied. Legacy records without a valid range retain definition-line
+    matching. A line-only caller remains supported for compatibility.
+    """
+    trust_additions = supports_promotion_assessment(report.contract_version)
     for fn in report.functions_in_file(file_path):
+        if trust_additions and fn.name_range is not None:
+            name_range = _contract_range_to_lsp(
+                fn.name_range,
+                lines=lines,
+                contract_version=report.contract_version,
+            )
+            if name_range.start.line != line:
+                continue
+            if character is None or (
+                name_range.start.character <= character < name_range.end.character
+            ):
+                return fn
+            continue
         if lsp_line(fn.line) == line:
             return fn
     return None
@@ -322,6 +473,36 @@ def _guidance_line(code: str, manifest: CapabilityManifest | None, *, degraded: 
     return f"- `{code}` — {guidance}" if guidance else f"- `{code}`"
 
 
+_HUMAN_SKIP_REASONS = {
+    "explicit-exemption": "explicit exemption",
+    "external-accelerator": "external accelerator owns execution",
+    "automatic-promotion-disabled": "automatic promotion is disabled",
+    "async-auto-promotion-not-supported": "async auto-promotion is not supported",
+    "method-auto-promotion-not-supported": "method auto-promotion is not supported",
+}
+
+
+def _human_skip_reason(reason: str | None) -> str:
+    """Render a stable human-readable assessment skip reason."""
+    if reason is None:
+        return "unspecified"
+    return _HUMAN_SKIP_REASONS.get(reason, reason.replace("-", " "))
+
+
+def _assessment_guidance_line(
+    record: PromotionDiagnostic,
+    manifest: CapabilityManifest | None,
+    *,
+    degraded: bool,
+) -> str:
+    """Render one promotion-evidence bullet with actionable guidance."""
+    guidance = record.suggestion
+    if not degraded and guidance is None:
+        guidance = _manifest_guidance(record.code, manifest)
+    result = f"- `{record.code}` — {record.message}"
+    return f"{result}  \n  {guidance}" if guidance else result
+
+
 def _advisory_codes(fn: FunctionReport) -> list[str]:
     """Non-rejection diagnostic codes on ``fn`` (informational/advisory), deduped."""
     rejection = set(fn.rejection_codes)
@@ -333,19 +514,56 @@ def _advisory_codes(fn: FunctionReport) -> list[str]:
 
 
 def build_hover_markdown(
-    fn: FunctionReport, manifest: CapabilityManifest | None, *, degraded: bool
+    fn: FunctionReport,
+    manifest: CapabilityManifest | None,
+    *,
+    degraded: bool,
+    promotion_assessment_supported: bool = True,
 ) -> str:
-    """Render hover markdown: route, status, rejection and advisory guidance."""
+    """Render route/status plus legacy and promotion-assessment guidance."""
     lines = [
         f"**Rextio route:** `{fn.route}`",
         f"**Native status:** `{fn.native_status}`",
     ]
-    if fn.rejection_codes:
+    assessment_codes: set[str] = set()
+    assessment = (
+        fn.promotion_assessment
+        if not degraded and promotion_assessment_supported
+        else None
+    )
+    if assessment is not None:
+        lines.extend(
+            [
+                f"**Promotion assessment:** `{assessment.status}`",
+                f"**Assessment source:** `{assessment.provenance}`",
+            ]
+        )
+        if assessment.status == "skipped":
+            lines.append(f"**Skipped:** {_human_skip_reason(assessment.skip_reason)}")
+        blockers = [record for record in assessment.diagnostics if record.kind == "blocker"]
+        advisories = [record for record in assessment.diagnostics if record.kind == "advisory"]
+        assessment_codes.update(record.code for record in assessment.diagnostics)
+        if blockers:
+            lines.append("")
+            lines.append("**Promotion blockers:**")
+            for record in blockers:
+                lines.append(
+                    _assessment_guidance_line(record, manifest, degraded=degraded)
+                )
+        if advisories:
+            lines.append("")
+            lines.append("**Promotion advisory:**")
+            for record in advisories:
+                lines.append(
+                    _assessment_guidance_line(record, manifest, degraded=degraded)
+                )
+    legacy_rejections = [code for code in fn.rejection_codes if code not in assessment_codes]
+    if legacy_rejections:
         lines.append("")
         lines.append("**Rejections:**")
-        for code in fn.rejection_codes:
+        for code in legacy_rejections:
             lines.append(_guidance_line(code, manifest, degraded=degraded))
-    advisory = _advisory_codes(fn)
+    advisory = [code for code in _advisory_codes(fn) if code not in assessment_codes]
     if advisory:
         lines.append("")
         lines.append("**Advisory:**")
@@ -359,27 +577,44 @@ def code_lenses_for(
 ) -> list[lsp.CodeLens]:
     """One route lens per analyzed function definition line in ``file_path``.
 
-    Title is ``Rextio: <route>``; the command is the informational no-op
-    :data:`ROUTE_INFO_COMMAND` carrying ``[qualname]`` as its argument.
+    Legacy titles remain ``Rextio: <route>``. A valid 2.2 assessment adds its
+    status (and a human-readable reason when skipped). Exact exemptions emit no
+    promotion lens. The informational command still carries a string qualname.
     """
     lenses: list[lsp.CodeLens] = []
+    trust_additions = supports_promotion_assessment(report.contract_version)
     # Function definition columns are always 0-based UTF-8 (ast.col_offset),
     # never the legacy RXT000 code-point special case.
     for fn in report.functions_in_file(file_path):
-        position = lsp.Position(
-            line=lsp_line(fn.line),
-            character=_character_at(
-                lines,
-                fn.line,
-                fn.column,
+        if trust_additions and fn.marker_kind == "exempt":
+            continue
+        if trust_additions and fn.source_range is not None:
+            position = _contract_range_to_lsp(
+                fn.source_range,
+                lines=lines,
                 contract_version=report.contract_version,
-            ),
-        )
+            ).start
+        else:
+            position = lsp.Position(
+                line=lsp_line(fn.line),
+                character=_character_at(
+                    lines,
+                    fn.line,
+                    fn.column,
+                    contract_version=report.contract_version,
+                ),
+            )
+        title = f"Rextio: {fn.route}"
+        if trust_additions and fn.promotion_assessment is not None:
+            assessment = fn.promotion_assessment
+            title = f"{title} · {assessment.status}"
+            if assessment.status == "skipped":
+                title = f"{title} ({_human_skip_reason(assessment.skip_reason)})"
         lenses.append(
             lsp.CodeLens(
                 range=lsp.Range(start=position, end=position),
                 command=lsp.Command(
-                    title=f"Rextio: {fn.route}",
+                    title=title,
                     command=ROUTE_INFO_COMMAND,
                     arguments=[fn.qualname],
                 ),
@@ -812,8 +1047,9 @@ class RextioLanguageServer(LanguageServer):
         # config may already have changed is harmless -- and doing it here keeps
         # the final gate the LAST thing before the store, so this potentially
         # slow acquisition cannot run *after* the gate and re-open the race.
+        manifest = None
         if not degraded:
-            self.engine.capabilities(project_root)
+            manifest = self.engine.capabilities(project_root)
 
         # Final generation gate. Invariant: once the generation has moved -- a
         # toml Changed/Deleted landed while this analysis was in flight, INCLUDING
@@ -834,11 +1070,21 @@ class RextioLanguageServer(LanguageServer):
             )
             return None
 
-        self._publish_for_project(project_root, report, degraded=degraded)
+        self._publish_for_project(
+            project_root,
+            report,
+            degraded=degraded,
+            manifest=manifest,
+        )
         return report
 
     def _publish_for_project(
-        self, project_root: Path, report: ProjectReport, *, degraded: bool
+        self,
+        project_root: Path,
+        report: ProjectReport,
+        *,
+        degraded: bool,
+        manifest: CapabilityManifest | None = None,
     ) -> None:
         published: set[str] = set()
         for doc in list(self.workspace.text_documents.values()):
@@ -850,7 +1096,11 @@ class RextioLanguageServer(LanguageServer):
                 continue
             lines = doc.source.splitlines()
             diagnostics = diagnostics_for_file(
-                report, str(resolved), degraded=degraded, lines=lines
+                report,
+                str(resolved),
+                degraded=degraded,
+                lines=lines,
+                manifest=manifest,
             )
             self._publish(doc.uri, diagnostics)
             published.add(doc.uri)
@@ -959,14 +1209,46 @@ class RextioLanguageServer(LanguageServer):
             self.schedule_analysis_for_uri(uri)
             return None
 
-        fn = function_at_line(report, str(resolved), position.line)
+        try:
+            source = self.workspace.get_text_document(uri).source
+            document_lines = source.splitlines()
+        except Exception:  # noqa: BLE001 -- hover must degrade for unopened docs
+            try:
+                document_lines = resolved.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeError):
+                document_lines = None
+        degraded = self._degraded.get(str(root), False)
+        fn = function_at_line(
+            report,
+            str(resolved),
+            position.line,
+            character=position.character,
+            lines=document_lines,
+        )
         if fn is None:
             return None
+        promotion_supported = supports_promotion_assessment(report.contract_version)
+        if not degraded and promotion_supported and fn.marker_kind == "exempt":
+            return None
 
-        degraded = self._degraded.get(str(root), False)
         manifest = None if degraded else self.engine.capabilities(root)
-        markdown = build_hover_markdown(fn, manifest, degraded=degraded)
-        return lsp.Hover(contents=lsp.MarkupContent(kind=lsp.MarkupKind.Markdown, value=markdown))
+        markdown = build_hover_markdown(
+            fn,
+            manifest,
+            degraded=degraded,
+            promotion_assessment_supported=promotion_supported,
+        )
+        hover_range = None
+        if not degraded and promotion_supported and fn.name_range is not None:
+            hover_range = _contract_range_to_lsp(
+                fn.name_range,
+                lines=document_lines,
+                contract_version=report.contract_version,
+            )
+        return lsp.Hover(
+            contents=lsp.MarkupContent(kind=lsp.MarkupKind.Markdown, value=markdown),
+            range=hover_range,
+        )
 
     # -- latency ------------------------------------------------------------ #
     def _record_check_duration(self, project_root: Path, elapsed: float) -> None:

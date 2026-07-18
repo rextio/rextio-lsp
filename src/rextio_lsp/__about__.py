@@ -6,4 +6,4 @@ by parsing this module's AST, so keeping it a single literal assignment avoids
 importing the full package at build time.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"

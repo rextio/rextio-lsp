@@ -62,6 +62,14 @@ def add_one(x: int) -> int:
     return x + 1
 
 
+def auto_add(x: int, y: int) -> int:
+    return x + y
+
+
+def auto_untyped(value):
+    return value
+
+
 @rextio.exempt
 def helper(xs: list[int]) -> int:
     return sum(xs)
@@ -83,7 +91,7 @@ require_type_hints = true
 
 
 def make_tiny_project(root: Path) -> Path:
-    """Write a minimal rextio project (one accepted + one rejected fn)."""
+    """Write a tiny project spanning explicit and automatic assessments."""
     (root / "rextio.toml").write_text(TINY_TOML, encoding="utf-8")
     pkg = root / "src" / "tiny"
     pkg.mkdir(parents=True)

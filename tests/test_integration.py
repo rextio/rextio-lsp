@@ -6,6 +6,7 @@ real in-process acquisition path over a tiny generated project.
 
 from __future__ import annotations
 
+import pytest
 from lsprotocol import types as lsp
 
 from rextio_lsp.contract import is_contract_supported
@@ -20,6 +21,15 @@ from rextio_lsp.server import (
 from conftest import make_tiny_project, needs_rextio, skip_without_rextio
 
 pytestmark = [needs_rextio, skip_without_rextio]
+
+
+def _contract_at_least_22(version: str) -> bool:
+    """Whether the live producer implements the additive 2.2 contract."""
+    try:
+        major, minor, *_ = (int(part) for part in version.split("."))
+    except (TypeError, ValueError):
+        return False
+    return (major, minor) >= (2, 2)
 
 
 def test_real_check_acquisition_and_diagnostics(tmp_path):
@@ -81,5 +91,52 @@ def test_real_code_lens_renders_on_accepted_function(tmp_path):
     by_arg = {lens.command.arguments[0]: lens for lens in lenses}
     # the accepted function renders a native-direct route lens
     add_one = by_arg["tiny.ops.add_one"]
-    assert add_one.command.title == "Rextio: native-direct"
+    assert add_one.command.title.startswith("Rextio: native-direct")
+    if report.contract_version.startswith("2.2."):
+        assert "eligible" in add_one.command.title
     assert add_one.command.command == "rextio.showRouteInfo"
+
+
+def test_real_contract_22_undecorated_eligible_and_ineligible(tmp_path):
+    """Exercise the repaired auto-assessment path against a live 2.2 core."""
+    module = make_tiny_project(tmp_path)
+    engine = Engine()
+    report = engine.check(tmp_path)
+    assert report is not None
+    if not _contract_at_least_22(report.contract_version):
+        pytest.skip("live rextio producer predates tooling-contract 2.2")
+
+    by_name = {fn.name: fn for fn in report.functions}
+    eligible = by_name["auto_add"]
+    assert eligible.marker_kind == "none"
+    assert eligible.promotion_assessment is not None
+    assert eligible.promotion_assessment.status == "eligible"
+    assert eligible.promotion_assessment.provenance == "auto"
+
+    ineligible = by_name["auto_untyped"]
+    assert ineligible.marker_kind == "none"
+    assert ineligible.route == "fallback-python"
+    assert ineligible.native_status == "not-candidate"
+    assert ineligible.rejection_codes == ()
+    assert ineligible.promotion_assessment is not None
+    assert ineligible.promotion_assessment.status == "ineligible"
+    blockers = [
+        diagnostic
+        for diagnostic in ineligible.promotion_assessment.diagnostics
+        if diagnostic.kind == "blocker"
+    ]
+    assert blockers
+    assert any(diagnostic.suggestion for diagnostic in blockers)
+
+    diagnostics = diagnostics_for_file(report, str(module), degraded=False)
+    assert any(diagnostic.severity == lsp.DiagnosticSeverity.Warning for diagnostic in diagnostics)
+    assert all(diagnostic.severity != lsp.DiagnosticSeverity.Error for diagnostic in diagnostics)
+
+    lenses = code_lenses_for(report, str(module.resolve()))
+    by_arg = {lens.command.arguments[0]: lens for lens in lenses}
+    assert "eligible" in by_arg[eligible.qualname].command.title
+    assert "ineligible" in by_arg[ineligible.qualname].command.title
+
+    markdown = build_hover_markdown(ineligible, engine.capabilities(tmp_path), degraded=False)
+    assert "Promotion blockers" in markdown
+    assert any(diagnostic.code in markdown for diagnostic in blockers)

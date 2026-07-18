@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.1.2 — 2026-07-18
+
+Package version `0.1.2`. This release adds the tooling-contract 2.2 promotion-
+assessment consumer surface while preserving legacy contract behavior.
+
+### Added
+
+- Show automatic native-promotion eligibility for undecorated functions.
+- Preserve failed automatic probes as actionable Warning-level editor guidance.
+- Show assessment status with each route CodeLens, including readable skip reasons.
+- Use exact function-name ranges for hover and source ranges for CodeLens anchors.
+
+### Changed
+
+- Hide promotion hover, diagnostics, and CodeLens noise for proven `@rextio.exempt` functions.
+- Trust the additive assessment fields only for tooling-contract `>=2.2.0,<3.0.0`.
+- Keep contract 1.x, 2.0/2.1, malformed payloads, and unsupported majors on legacy behavior.
+
+### Fixed
+
+- Keep assessment blockers out of LSP Error severity while retaining improvement suggestions.
+- De-duplicate matching legacy and assessment diagnostics without hiding unrelated diagnostics.
+- Tolerate malformed marker, assessment, and range additions without dropping legacy reports.
+- No-op cleanly when the optional `rextio` core is absent instead of failing package discovery.
+- Withhold quick fixes on Python 3.11 tokenizer `ERRORTOKEN`s instead of risking malformed edits.
+
+### Required release order
+
+Release Train B deploys `rextio-lsp` **0.1.2** before core `rextio` **0.1.4**:
+the tolerant LSP consumer is released first, and the tooling-contract **2.2.0**
+producer follows. Core must not ship before or simultaneously with this LSP.
+
 ## 0.1.1 — 2026-07-14
 
 Package version `0.1.1`. This release finalizes the dual-map work. It follows

@@ -44,6 +44,38 @@ SUPPORTED_CONTRACT_MAJOR = 2
 # here (not in the server) so it is unit-testable without pygls.
 INFORMATIONAL_CODES = frozenset({"RXT075", "RXT080", "RXT090", "RXT091"})
 
+MARKER_KINDS = frozenset({"none", "native", "exempt"})
+PROMOTION_STATUSES = frozenset({"eligible", "ineligible", "skipped"})
+PROMOTION_PROVENANCES = frozenset(
+    {
+        "auto",
+        "explicit-native",
+        "explicit-exempt",
+        "external-accelerator",
+        "plugin-managed",
+        "policy-skip",
+        "structural-skip",
+    }
+)
+PROMOTION_DIAGNOSTIC_KINDS = frozenset({"blocker", "advisory"})
+PROMOTION_SKIP_REASONS = frozenset(
+    {
+        "explicit-exemption",
+        "external-accelerator",
+        "automatic-promotion-disabled",
+        "async-auto-promotion-not-supported",
+        "method-auto-promotion-not-supported",
+    }
+)
+
+_SKIP_REASON_PROVENANCE = {
+    "explicit-exemption": "explicit-exempt",
+    "external-accelerator": "external-accelerator",
+    "automatic-promotion-disabled": "policy-skip",
+    "async-auto-promotion-not-supported": "structural-skip",
+    "method-auto-promotion-not-supported": "structural-skip",
+}
+
 
 def lsp_line(contract_line: int) -> int:
     """Convert a 1-based contract line to a 0-based LSP line (never negative)."""
@@ -134,6 +166,47 @@ class DiagnosticRecord:
 
 
 @dataclass(frozen=True)
+class ContractPosition:
+    """One contract-2 source position (1-based line, UTF-8 byte column)."""
+
+    line: int
+    column: int
+
+
+@dataclass(frozen=True)
+class ContractRange:
+    """A validated half-open contract-2 source range."""
+
+    start: ContractPosition
+    end: ContractPosition
+
+
+@dataclass(frozen=True)
+class PromotionDiagnostic:
+    """Non-build diagnostic produced by a native-promotion assessment."""
+
+    kind: str
+    code: str
+    message: str
+    suggestion: str | None
+    line: int
+    column: int
+    end_line: int | None
+    end_column: int | None
+
+
+@dataclass(frozen=True)
+class PromotionAssessment:
+    """Additive tooling-contract 2.2 native-promotion evidence."""
+
+    status: str
+    provenance: str
+    diagnostic_codes: tuple[str, ...]
+    diagnostics: tuple[PromotionDiagnostic, ...]
+    skip_reason: str | None
+
+
+@dataclass(frozen=True)
 class FunctionReport:
     """A single analyzed function: where it runs and why."""
 
@@ -146,6 +219,10 @@ class FunctionReport:
     native_status: str
     rejection_codes: tuple[str, ...] = ()
     diagnostics: tuple[DiagnosticRecord, ...] = ()
+    marker_kind: str = "none"
+    promotion_assessment: PromotionAssessment | None = None
+    source_range: ContractRange | None = None
+    name_range: ContractRange | None = None
 
 
 @dataclass(frozen=True)
@@ -238,6 +315,25 @@ def is_contract_supported(version: str | None) -> bool:
     return major is not None and major in SUPPORTED_CONTRACT_MAJORS
 
 
+def supports_promotion_assessment(version: str | None) -> bool:
+    """Return whether additive promotion-assessment fields are authoritative.
+
+    The new marker, assessment, and reliable-range semantics begin at tooling
+    contract 2.2. A same-named field in major 1, 2.0/2.1, an unsupported major,
+    or malformed version is unknown data and must not affect editor behavior.
+    """
+    if version is None:
+        return False
+    core = version.strip().split("+", 1)[0].split("-", 1)[0]
+    parts = core.split(".")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        return False
+    major, minor, patch = (int(part) for part in parts)
+    if patch < 0:  # defensive; ``isdigit`` already excludes a sign
+        return False
+    return major == 2 and minor >= 2
+
+
 def _optional_int(value: Any) -> int | None:
     """Coerce a raw contract value to ``int`` or ``None`` (never raises)."""
     if value is None:
@@ -277,19 +373,197 @@ def _parse_diagnostic(raw: dict[str, Any]) -> DiagnosticRecord:
     )
 
 
-def _parse_function(raw: dict[str, Any]) -> FunctionReport:
+def _parse_contract_position(raw: Any) -> ContractPosition | None:
+    """Parse one contract position, returning ``None`` for malformed input."""
+    if not isinstance(raw, dict):
+        return None
+    line = _optional_int(raw.get("line"))
+    column = _optional_int(raw.get("column"))
+    if line is None or column is None or line < 1 or column < 0:
+        return None
+    return ContractPosition(line=line, column=column)
+
+
+def _parse_contract_range(raw: Any, *, single_line: bool = False) -> ContractRange | None:
+    """Parse and validate a non-empty half-open contract source range."""
+    if not isinstance(raw, dict):
+        return None
+    start = _parse_contract_position(raw.get("start"))
+    end = _parse_contract_position(raw.get("end"))
+    if start is None or end is None:
+        return None
+    if (end.line, end.column) <= (start.line, start.column):
+        return None
+    if single_line and start.line != end.line:
+        return None
+    return ContractRange(start=start, end=end)
+
+
+def _parse_promotion_diagnostic(raw: Any) -> PromotionDiagnostic | None:
+    """Parse one assessment diagnostic without raising on malformed records."""
+    if not isinstance(raw, dict):
+        return None
+    kind = raw.get("kind")
+    code = raw.get("code")
+    message = raw.get("message")
+    line = _optional_int(raw.get("line"))
+    column = _optional_int(raw.get("column"))
+    if (
+        not isinstance(kind, str)
+        or kind not in PROMOTION_DIAGNOSTIC_KINDS
+        or not isinstance(code, str)
+        or not isinstance(message, str)
+        or line is None
+        or line < 1
+        or column is None
+        or column < 0
+    ):
+        return None
+
+    suggestion = raw.get("suggestion")
+    if suggestion is not None and not isinstance(suggestion, str):
+        return None
+    end_line = _optional_int(raw.get("end_line"))
+    end_column = _optional_int(raw.get("end_column"))
+    if end_line is not None and end_line < 1:
+        return None
+    if end_column is not None and end_column < 0:
+        return None
+    if end_line is not None and end_column is not None:
+        if (end_line, end_column) < (line, column):
+            return None
+    return PromotionDiagnostic(
+        kind=kind,
+        code=code,
+        message=message,
+        suggestion=suggestion,
+        line=line,
+        column=column,
+        end_line=end_line,
+        end_column=end_column,
+    )
+
+
+def _parse_promotion_assessment(raw: Any) -> PromotionAssessment | None:
+    """Parse a semantically valid tooling-contract 2.2 assessment.
+
+    A malformed additive object is treated as unavailable. This keeps legacy
+    route/status behavior usable without guessing an assessment from fields
+    that cannot distinguish failed probes, exemptions, and structural skips.
+    """
+    if not isinstance(raw, dict):
+        return None
+    status = raw.get("status")
+    provenance = raw.get("provenance")
+    if (
+        not isinstance(status, str)
+        or status not in PROMOTION_STATUSES
+        or not isinstance(provenance, str)
+        or provenance not in PROMOTION_PROVENANCES
+    ):
+        return None
+
+    raw_codes = raw.get("diagnostic_codes")
+    raw_diagnostics = raw.get("diagnostics")
+    if not isinstance(raw_codes, list) or not all(isinstance(code, str) for code in raw_codes):
+        return None
+    if not isinstance(raw_diagnostics, list):
+        return None
+    diagnostics: list[PromotionDiagnostic] = []
+    for item in raw_diagnostics:
+        diagnostic = _parse_promotion_diagnostic(item)
+        if diagnostic is None:
+            return None
+        diagnostics.append(diagnostic)
+
+    codes = tuple(raw_codes)
+    derived_codes = tuple(sorted({diagnostic.code for diagnostic in diagnostics}))
+    if codes != derived_codes:
+        return None
+
+    skip_reason = raw.get("skip_reason")
+    if skip_reason is not None and (
+        not isinstance(skip_reason, str) or skip_reason not in PROMOTION_SKIP_REASONS
+    ):
+        return None
+    blockers = any(diagnostic.kind == "blocker" for diagnostic in diagnostics)
+    if status == "eligible":
+        if (
+            blockers
+            or skip_reason is not None
+            or provenance not in {"auto", "explicit-native", "plugin-managed"}
+        ):
+            return None
+    elif status == "ineligible":
+        if (
+            not blockers
+            or skip_reason is not None
+            or provenance not in {"auto", "explicit-native", "plugin-managed"}
+        ):
+            return None
+    else:
+        if diagnostics or codes or not isinstance(skip_reason, str):
+            return None
+        if _SKIP_REASON_PROVENANCE.get(skip_reason) != provenance:
+            return None
+
+    return PromotionAssessment(
+        status=status,
+        provenance=provenance,
+        diagnostic_codes=codes,
+        diagnostics=tuple(diagnostics),
+        skip_reason=skip_reason,
+    )
+
+
+def _parse_function(raw: dict[str, Any], *, trust_additions: bool) -> FunctionReport:
+    marker_kind = raw.get("marker_kind") if trust_additions else "none"
+    if not isinstance(marker_kind, str) or marker_kind not in MARKER_KINDS:
+        marker_kind = "none"
+    line = _int_or(raw.get("line"), 1)
+    column = _int_or(raw.get("column"), 0)
+    source_range = _parse_contract_range(raw.get("source_range")) if trust_additions else None
+    name_range = (
+        _parse_contract_range(raw.get("name_range"), single_line=True)
+        if trust_additions
+        else None
+    )
+    if source_range is not None and source_range.start != ContractPosition(line, column):
+        source_range = None
+        name_range = None
+    elif source_range is None:
+        # ``name_range`` is meaningful only as part of the coherent 2.2 range
+        # pair; without the enclosing source range its ownership is unproven.
+        name_range = None
+    elif name_range is not None:
+        source_start = (source_range.start.line, source_range.start.column)
+        source_end = (source_range.end.line, source_range.end.column)
+        name_start = (name_range.start.line, name_range.start.column)
+        name_end = (name_range.end.line, name_range.end.column)
+        if name_range.start.line != source_range.start.line or not (
+            source_start <= name_start < name_end <= source_end
+        ):
+            name_range = None
     return FunctionReport(
         qualname=str(raw.get("qualname", raw.get("name", ""))),
         name=str(raw.get("name", "")),
         file_path=str(raw.get("file_path", "")),
-        line=_int_or(raw.get("line"), 1),
-        column=_int_or(raw.get("column"), 0),
+        line=line,
+        column=column,
         route=str(raw.get("route", "")),
         native_status=str(raw.get("native_status", "")),
         rejection_codes=tuple(str(c) for c in raw.get("rejection_codes", ()) or ()),
         diagnostics=tuple(
             _parse_diagnostic(d) for d in raw.get("diagnostics", ()) or () if isinstance(d, dict)
         ),
+        marker_kind=marker_kind,
+        promotion_assessment=(
+            _parse_promotion_assessment(raw.get("promotion_assessment"))
+            if trust_additions
+            else None
+        ),
+        source_range=source_range,
+        name_range=name_range,
     )
 
 
@@ -299,18 +573,20 @@ def parse_check_report(data: dict[str, Any]) -> ProjectReport:
     Unknown top-level and per-record fields are ignored (forward compatibility,
     per the contract's "tolerate unknown fields" rule).
     """
+    contract_version = str(data.get("contract_version", ""))
+    trust_additions = supports_promotion_assessment(contract_version)
     functions: list[FunctionReport] = []
     for module in data.get("modules", ()) or ():
         if not isinstance(module, dict):
             continue
         for fn in module.get("functions", ()) or ():
             if isinstance(fn, dict):
-                functions.append(_parse_function(fn))
+                functions.append(_parse_function(fn, trust_additions=trust_additions))
     top = tuple(
         _parse_diagnostic(d) for d in data.get("diagnostics", ()) or () if isinstance(d, dict)
     )
     return ProjectReport(
-        contract_version=str(data.get("contract_version", "")),
+        contract_version=contract_version,
         project_root=str(data.get("project_root", "")),
         functions=tuple(functions),
         top_level_diagnostics=top,

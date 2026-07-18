@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import tokenize
 from pathlib import Path
 
 from lsprotocol import types as lsp
@@ -25,6 +26,7 @@ from rextio_lsp.server import (
     code_lenses_for,
     create_server,
     diagnostics_for_file,
+    _line_tokens,
     _native_exempt_span,
     find_native_decorator_line,
     function_at_line,
@@ -111,6 +113,76 @@ def _rejected_report(module: str, *, def_line: int, diag_line: int) -> "object":
     )
 
 
+def _promotion_report(
+    module: str,
+    *,
+    marker_kind: str = "none",
+    status: str = "ineligible",
+    provenance: str = "auto",
+    skip_reason: str | None = None,
+    legacy_diagnostics: list[dict] | None = None,
+    assessment_diagnostics: list[dict] | None = None,
+    contract_version: str = "2.2.0",
+) -> "object":
+    """Build one coherent tooling-contract 2.2 function report."""
+    if assessment_diagnostics is None:
+        assessment_diagnostics = [
+            {
+                "kind": "blocker",
+                "code": "RXT001",
+                "message": "native promotion requires resolved types",
+                "suggestion": "Add supported type annotations.",
+                "line": 2,
+                "column": 0,
+                "end_line": 2,
+                "end_column": 10,
+            }
+        ]
+    if status == "skipped":
+        assessment_diagnostics = []
+    codes = sorted({record["code"] for record in assessment_diagnostics})
+    return parse_check_report(
+        {
+            "contract_version": contract_version,
+            "project_root": str(Path(module).parent),
+            "modules": [
+                {
+                    "file_path": module,
+                    "functions": [
+                        {
+                            "qualname": "ops.auto_bad",
+                            "name": "auto_bad",
+                            "file_path": module,
+                            "line": 2,
+                            "column": 0,
+                            "route": "fallback-python",
+                            "native_status": "not-candidate",
+                            "rejection_codes": [],
+                            "diagnostics": legacy_diagnostics or [],
+                            "marker_kind": marker_kind,
+                            "promotion_assessment": {
+                                "status": status,
+                                "provenance": provenance,
+                                "diagnostic_codes": codes,
+                                "diagnostics": assessment_diagnostics,
+                                "skip_reason": skip_reason,
+                            },
+                            "source_range": {
+                                "start": {"line": 2, "column": 0},
+                                "end": {"line": 3, "column": 12},
+                            },
+                            "name_range": {
+                                "start": {"line": 2, "column": 4},
+                                "end": {"line": 2, "column": 12},
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
 def test_map_severity_never_error():
     assert map_severity("RXT070", is_rejection=True) == lsp.DiagnosticSeverity.Warning
     assert map_severity("RXT075", is_rejection=False) == lsp.DiagnosticSeverity.Hint
@@ -164,6 +236,119 @@ def test_diagnostics_for_file_maps_boundary(check_boundary):
     assert all(d.source == "rextio" for d in diags)
 
 
+def test_assessment_blocker_is_warning_with_producer_suggestion():
+    module = "/proj/ops.py"
+    report = _promotion_report(module)
+    diags = diagnostics_for_file(report, module, degraded=False)
+    assert len(diags) == 1
+    assert diags[0].code == "RXT001"
+    assert diags[0].severity == lsp.DiagnosticSeverity.Warning
+    assert "Add supported type annotations." in diags[0].message
+    assert diags[0].severity != lsp.DiagnosticSeverity.Error
+
+
+def test_assessment_advisory_uses_hint_policy_and_manifest_guidance():
+    module = "/proj/ops.py"
+    report = _promotion_report(
+        module,
+        status="eligible",
+        assessment_diagnostics=[
+            {
+                "kind": "advisory",
+                "code": "RXT075",
+                "message": "scalar boundary call",
+                "suggestion": None,
+                "line": 3,
+                "column": 4,
+                "end_line": None,
+                "end_column": None,
+            }
+        ],
+    )
+    manifest = parse_capabilities(
+        {
+            "contract_version": "2.2.0",
+            "rules": [
+                {
+                    "id": "core.scalar-boundary",
+                    "provider": "core",
+                    "diagnostic_code": "RXT075",
+                    "constraint": "scalar only",
+                    "guidance": "Keep the boundary scalar and typed.",
+                    "outcome": "note",
+                    "stability": "stable",
+                }
+            ],
+        }
+    )
+    diags = diagnostics_for_file(
+        report,
+        module,
+        degraded=False,
+        manifest=manifest,
+    )
+    assert len(diags) == 1
+    assert diags[0].severity == lsp.DiagnosticSeverity.Hint
+    assert "Keep the boundary scalar and typed." in diags[0].message
+
+
+def test_assessment_diagnostic_dedups_matching_legacy_six_field_key():
+    module = "/proj/ops.py"
+    legacy = {
+        "code": "RXT001",
+        "message": "native promotion requires resolved types",
+        "severity": "error",
+        "file_path": module,
+        "line": 2,
+        "column": 0,
+        "end_line": 2,
+        "end_column": 10,
+        "suggestion": "Add supported type annotations.",
+    }
+    report = _promotion_report(module, legacy_diagnostics=[legacy])
+    diags = diagnostics_for_file(report, module, degraded=False)
+    assert len(diags) == 1
+    assert diags[0].code == "RXT001"
+
+
+def test_assessment_diagnostic_with_different_span_is_not_deduped():
+    module = "/proj/ops.py"
+    legacy = {
+        "code": "RXT001",
+        "message": "native promotion requires resolved types",
+        "severity": "error",
+        "file_path": module,
+        "line": 2,
+        "column": 0,
+        "end_line": 2,
+        "end_column": 9,
+    }
+    report = _promotion_report(module, legacy_diagnostics=[legacy])
+    assert len(diagnostics_for_file(report, module, degraded=False)) == 2
+
+
+def test_exact_exempt_suppresses_assessment_but_keeps_legacy_diagnostic():
+    module = "/proj/ops.py"
+    legacy = {
+        "code": "RXT091",
+        "message": "unrelated analyzer note",
+        "severity": "info",
+        "file_path": module,
+        "line": 3,
+        "column": 4,
+    }
+    report = _promotion_report(
+        module,
+        marker_kind="exempt",
+        status="skipped",
+        provenance="explicit-exempt",
+        skip_reason="explicit-exemption",
+        legacy_diagnostics=[legacy],
+    )
+    diags = diagnostics_for_file(report, module, degraded=False)
+    assert [diag.code for diag in diags] == ["RXT091"]
+
+
 def test_function_at_line(check_boundary):
     report = parse_check_report(check_boundary)
     # compute_rejected is defined on line 37 (1-based) -> LSP line 36
@@ -171,6 +356,52 @@ def test_function_at_line(check_boundary):
     assert fn is not None
     assert fn.qualname == "boundary_demo.pipeline.compute_rejected"
     assert function_at_line(report, PIPELINE, 999) is None
+
+
+def test_function_at_line_uses_utf16_name_range_when_character_supplied():
+    module = "/proj/ops.py"
+    report = parse_check_report(
+        {
+            "contract_version": "2.2.0",
+            "modules": [
+                {
+                    "functions": [
+                        {
+                            "qualname": "ops.함수",
+                            "name": "함수",
+                            "file_path": module,
+                            "line": 1,
+                            "column": 0,
+                            "route": "native-direct",
+                            "native_status": "accepted",
+                            "source_range": {
+                                "start": {"line": 1, "column": 0},
+                                "end": {"line": 2, "column": 12},
+                            },
+                            "name_range": {
+                                "start": {"line": 1, "column": 4},
+                                "end": {"line": 1, "column": 10},
+                            },
+                        }
+                    ]
+                }
+            ],
+        }
+    )
+    lines = ["def 함수(x):", "    return x"]
+    assert function_at_line(report, module, 0, character=4, lines=lines) is not None
+    assert function_at_line(report, module, 0, character=5, lines=lines) is not None
+    assert function_at_line(report, module, 0, character=3, lines=lines) is None
+    assert function_at_line(report, module, 0, character=6, lines=lines) is None
+
+
+def test_unsupported_major_ignores_name_range_and_uses_legacy_def_line():
+    module = "/proj/ops.py"
+    report = _promotion_report(module, contract_version="3.0.0")
+    # The character is outside the serialized name range, but unsupported-major
+    # additions are ignored and the legacy def-line lookup remains available.
+    assert function_at_line(report, module, 1, character=99, lines=["", "def auto_bad():"]) \
+        is not None
 
 
 def test_build_hover_markdown_with_guidance(check_boundary, capabilities_boundary):
@@ -199,6 +430,37 @@ def test_build_hover_markdown_accepted_no_rejections():
     md = build_hover_markdown(fn, None, degraded=False)
     assert "native-direct" in md
     assert "Rejections" not in md
+
+
+def test_build_hover_markdown_renders_failed_auto_guidance():
+    report = _promotion_report("/proj/ops.py")
+    md = build_hover_markdown(report.functions[0], None, degraded=False)
+    assert "Promotion assessment:** `ineligible`" in md
+    assert "Assessment source:** `auto`" in md
+    assert "Promotion blockers" in md
+    assert "RXT001" in md
+    assert "native promotion requires resolved types" in md
+    assert "Add supported type annotations." in md
+
+
+def test_build_hover_markdown_renders_skipped_reason():
+    report = _promotion_report(
+        "/proj/ops.py",
+        status="skipped",
+        provenance="structural-skip",
+        skip_reason="method-auto-promotion-not-supported",
+    )
+    md = build_hover_markdown(report.functions[0], None, degraded=False)
+    assert "Promotion assessment:** `skipped`" in md
+    assert "method auto-promotion is not supported" in md
+
+
+def test_build_hover_markdown_degraded_ignores_assessment():
+    report = _promotion_report("/proj/ops.py", contract_version="3.0.0")
+    md = build_hover_markdown(report.functions[0], None, degraded=True)
+    assert "fallback-python" in md
+    assert "Promotion assessment" not in md
+    assert "RXT001" not in md
 
 
 def test_create_server_registers_only_rextio_features():
@@ -305,6 +567,78 @@ def test_code_lenses_for_titles_and_args(check_boundary):
         lens for lens in lenses if lens.command.arguments == ["boundary_demo.pipeline.square"]
     )
     assert square.range.start.line == 4
+
+
+def test_code_lens_contract_22_has_route_assessment_and_source_anchor():
+    module = "/proj/ops.py"
+    report = _promotion_report(module)
+    (lens,) = code_lenses_for(report, module, lines=["", "def auto_bad(x):", "    return x"])
+    assert lens.command.title == "Rextio: fallback-python · ineligible"
+    assert lens.command.command == ROUTE_INFO_COMMAND
+    assert lens.command.arguments == ["ops.auto_bad"]
+    assert isinstance(lens.command.arguments[0], str)
+    assert (lens.range.start.line, lens.range.start.character) == (1, 0)
+
+
+def test_code_lens_contract_22_skipped_includes_human_reason():
+    module = "/proj/ops.py"
+    report = _promotion_report(
+        module,
+        status="skipped",
+        provenance="structural-skip",
+        skip_reason="async-auto-promotion-not-supported",
+    )
+    (lens,) = code_lenses_for(report, module)
+    assert "fallback-python" in lens.command.title
+    assert "skipped" in lens.command.title
+    assert "async auto-promotion is not supported" in lens.command.title
+
+
+def test_code_lens_exact_exempt_is_suppressed():
+    module = "/proj/ops.py"
+    report = _promotion_report(
+        module,
+        marker_kind="exempt",
+        status="skipped",
+        provenance="explicit-exempt",
+        skip_reason="explicit-exemption",
+    )
+    assert code_lenses_for(report, module) == []
+
+
+def test_code_lens_unsupported_major_ignores_additions_and_exempt():
+    module = "/proj/ops.py"
+    report = _promotion_report(
+        module,
+        marker_kind="exempt",
+        status="skipped",
+        provenance="explicit-exempt",
+        skip_reason="explicit-exemption",
+        contract_version="3.0.0",
+    )
+    (lens,) = code_lenses_for(report, module)
+    assert lens.command.title == "Rextio: fallback-python"
+    assert lens.range.start.line == 1
+    assert lens.command.arguments == ["ops.auto_bad"]
+
+
+def test_code_lens_contract_21_same_named_fields_are_not_authoritative():
+    module = "/proj/ops.py"
+    report = _promotion_report(
+        module,
+        marker_kind="exempt",
+        status="skipped",
+        provenance="explicit-exempt",
+        skip_reason="explicit-exemption",
+        contract_version="2.1.0",
+    )
+    (fn,) = report.functions
+    assert fn.marker_kind == "none"
+    assert fn.promotion_assessment is None
+    assert fn.source_range is None
+    assert fn.name_range is None
+    (lens,) = code_lenses_for(report, module)
+    assert lens.command.title == "Rextio: fallback-python"
 
 
 # --------------------------------------------------------------------------- #
@@ -599,6 +933,65 @@ def test_hover_for_uses_cached_report(tmp_path):
 
     # a non-definition line yields no hover
     assert server.hover_for(module.as_uri(), lsp.Position(line=50, character=0)) is None
+
+
+def test_hover_for_contract_22_uses_name_range(tmp_path):
+    (tmp_path / "rextio.toml").write_text("[build]\n", encoding="utf-8")
+    module = tmp_path / "ops.py"
+    text = "\ndef auto_bad(x):\n    return x\n"
+    module.write_text(text, encoding="utf-8")
+    server = RextioLanguageServer()
+    _setup_workspace(server, (module.as_uri(), text))
+    report = _promotion_report(str(module))
+    server._reports[str(tmp_path)] = report
+    server._degraded[str(tmp_path)] = False
+    server.engine.capabilities = lambda _root: None  # type: ignore[method-assign]
+
+    # Cursor on the identifier: hover includes assessment and returns the exact
+    # identifier range. Cursor on `def` is outside the name range.
+    hover = server.hover_for(module.as_uri(), lsp.Position(line=1, character=4))
+    assert hover is not None
+    assert hover.range == lsp.Range(
+        start=lsp.Position(line=1, character=4),
+        end=lsp.Position(line=1, character=12),
+    )
+    assert "Promotion blockers" in hover.contents.value
+    assert server.hover_for(module.as_uri(), lsp.Position(line=1, character=1)) is None
+
+
+def test_hover_for_exact_exempt_suppressed_but_unsupported_major_not_suppressed(tmp_path):
+    (tmp_path / "rextio.toml").write_text("[build]\n", encoding="utf-8")
+    module = tmp_path / "ops.py"
+    text = "\ndef auto_bad(x):\n    return x\n"
+    module.write_text(text, encoding="utf-8")
+    server = RextioLanguageServer()
+    _setup_workspace(server, (module.as_uri(), text))
+
+    exempt = _promotion_report(
+        str(module),
+        marker_kind="exempt",
+        status="skipped",
+        provenance="explicit-exempt",
+        skip_reason="explicit-exemption",
+    )
+    server._reports[str(tmp_path)] = exempt
+    server._degraded[str(tmp_path)] = False
+    assert server.hover_for(module.as_uri(), lsp.Position(line=1, character=4)) is None
+
+    unsupported = _promotion_report(
+        str(module),
+        marker_kind="exempt",
+        status="skipped",
+        provenance="explicit-exempt",
+        skip_reason="explicit-exemption",
+        contract_version="3.0.0",
+    )
+    server._reports[str(tmp_path)] = unsupported
+    server._degraded[str(tmp_path)] = True
+    hover = server.hover_for(module.as_uri(), lsp.Position(line=1, character=99))
+    assert hover is not None
+    assert hover.range is None
+    assert "Promotion assessment" not in hover.contents.value
 
 
 # --------------------------------------------------------------------------- #
@@ -1168,6 +1561,17 @@ def test_code_action_withheld_for_unterminated_string_in_args():
         '@rextio.native(target="oops)\ndef rejected(xs: list[int]) -> int:\n    return helper(xs)\n'
     )
     assert _exempt_edit_apply(text) == []
+
+
+def test_line_tokens_rejects_errortoken_without_tokenizer_exception(monkeypatch):
+    """Python 3.11 reports an unterminated quote as a token, not an exception."""
+    tokens = [
+        tokenize.TokenInfo(tokenize.ERRORTOKEN, '"', (1, 22), (1, 23), 'target="oops)'),
+        tokenize.TokenInfo(tokenize.NAME, "oops", (1, 23), (1, 27), 'target="oops)'),
+        tokenize.TokenInfo(tokenize.OP, ")", (1, 27), (1, 28), 'target="oops)'),
+    ]
+    monkeypatch.setattr(tokenize, "generate_tokens", lambda _readline: iter(tokens))
+    assert _line_tokens('@rextio.native(target="oops)') is None
 
 
 # --------------------------------------------------------------------------- #

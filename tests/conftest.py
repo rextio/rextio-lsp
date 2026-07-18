@@ -45,7 +45,10 @@ def check_syntax_error() -> dict[str, Any]:
     return load_fixture("check_syntax_error.json")
 
 
-rextio_available = importlib.util.find_spec("rextio.cli.main") is not None
+rextio_available = (
+    importlib.util.find_spec("rextio") is not None
+    and importlib.util.find_spec("rextio.cli.main") is not None
+)
 
 needs_rextio = pytest.mark.needs_rextio
 skip_without_rextio = pytest.mark.skipif(
@@ -60,6 +63,14 @@ import rextio
 @rextio.native
 def add_one(x: int) -> int:
     return x + 1
+
+
+def auto_add(x: int, y: int) -> int:
+    return x + y
+
+
+def auto_untyped(value):
+    return value
 
 
 @rextio.exempt
@@ -83,7 +94,7 @@ require_type_hints = true
 
 
 def make_tiny_project(root: Path) -> Path:
-    """Write a minimal rextio project (one accepted + one rejected fn)."""
+    """Write a tiny project spanning explicit and automatic assessments."""
     (root / "rextio.toml").write_text(TINY_TOML, encoding="utf-8")
     pkg = root / "src" / "tiny"
     pkg.mkdir(parents=True)

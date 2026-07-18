@@ -69,7 +69,10 @@ class AcquisitionError(RuntimeError):
 def _rextio_available_in_process() -> bool:
     import importlib.util
 
-    return importlib.util.find_spec("rextio.cli.main") is not None
+    return (
+        importlib.util.find_spec("rextio") is not None
+        and importlib.util.find_spec("rextio.cli.main") is not None
+    )
 
 
 def _run_in_process(argv: list[str]) -> dict[str, Any]:

@@ -417,6 +417,41 @@ def test_build_hover_markdown_with_guidance(check_boundary, capabilities_boundar
     assert "—" in md
 
 
+def test_build_hover_markdown_uses_plugin_rule_guidance():
+    """Plugin-provided rules use the same diagnostic-code guidance path."""
+    fn = FunctionReport(
+        qualname="ops.kernel",
+        name="kernel",
+        file_path="/proj/ops.py",
+        line=1,
+        column=0,
+        route="fallback-python",
+        native_status="rejected",
+        rejection_codes=("RXTP-NUMPY-001",),
+    )
+    manifest = parse_capabilities(
+        {
+            "contract_version": "2.24.0",
+            "rules": [
+                {
+                    "id": "rextio-numpy/elementwise-float64",
+                    "provider": "rextio-numpy",
+                    "diagnostic_code": "RXTP-NUMPY-001",
+                    "constraint": "Only float64 elementwise operations lower.",
+                    "guidance": "Use float64 arrays.",
+                    "outcome": "fallback",
+                    "stability": "stable",
+                }
+            ],
+        }
+    )
+
+    markdown = build_hover_markdown(fn, manifest, degraded=False)
+
+    assert "RXTP-NUMPY-001" in markdown
+    assert "Use float64 arrays." in markdown
+
+
 def test_build_hover_markdown_accepted_no_rejections():
     fn = FunctionReport(
         qualname="m.f",

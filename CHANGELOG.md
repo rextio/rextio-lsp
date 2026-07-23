@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.3 — Unreleased
+
+### Changed
+
+- CI now installs the released `rextio==0.1.5` producer in a dedicated Python
+  3.11 job and exercises the real tooling-contract 2.24.0 integration path,
+  including undecorated automatic-promotion assessments.
+- Retain provider-agnostic rule guidance: capability records from first-party
+  plugins use the same diagnostic-code lookup as core rules.
+
 ## 0.1.2 — 2026-07-18
 
 Package version `0.1.2`. This release adds the tooling-contract 2.2 promotion-

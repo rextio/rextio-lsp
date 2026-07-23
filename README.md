@@ -156,7 +156,7 @@ Contributor and agent guidance lives in the repository (`AGENTS.md`).
 
 | Component | Floor |
 |---|---|
-| Package version | `0.1.2` (see `__about__.__version__`) |
+| Package version | `0.1.3` unreleased (`0.1.2` is the current PyPI release) |
 | Python | `>= 3.11` |
 | pygls | `>= 2.1, < 3` |
 | Tooling-contract majors | `{1, 2}` supported; promotion assessments require `>=2.2.0,<3.0.0`; other majors → degraded |
